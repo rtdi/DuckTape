@@ -1,4 +1,4 @@
-# PythonDataIntegration
+# Ducktape
 Let's build a data integration tool based on Python for flexibility and DuckDB for performance.
 
 ## Scope
