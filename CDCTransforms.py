@@ -1,10 +1,81 @@
 import logging
 from datetime import datetime, timezone
+from enum import Enum
 from logging import Logger
 from typing import Union, Iterable
 
 from SQLUtils import quote_str, convert_list_to_str, get_cols, get_table_primary_key, empty, get_first, get_count
-from Metadata import Dataset
+from Metadata import Dataset, OperationalMetadata
+
+class RowType(Enum):
+    INSERT = 'I'
+    """
+    A brand new record was inserted. A record with this primary key was not present before.
+    If there is no guarantee such record does not exist yet, use UPSERT instead.
+    """
+    UPDATE = 'U'
+    """
+    After image row.
+    An existing record was updated. This record is the holder of the new values.
+    """
+    DELETE = 'D'
+    """
+    An existing record was deleted, the provided records contains the complete latest version with all payload fields.
+    If only the primary key of the payload is known, use EXTERMINATE instead.
+    """
+    BEFORE = 'B'
+    """
+    Before image row.
+    An existing record was updated. This record is the holder of the old values.
+    """
+    UPSERT = 'A'
+    """
+    In case either a new record should be created or its last version overwritten, use this 
+    UPSERT RowType ("AutoCorrect").
+    """
+    EXTERMINATE = 'X'
+    """
+    When the payload of a delete has null values everywhere except for the primary key fields, then the 
+    proper code is EXTERMINATE.
+    A database would execute a "delete from table where pk = ?" and ignore all other fields.
+    """
+    TRUNCATE = 'T'
+    """
+    Delete a set of rows at once. An example could be to delete all records of a given patient from the diagnosis table.
+    In that case the diagnosis table would get a record of type truncate with all payload fields including the 
+    PK being null, only the patient field has a value.
+    """
+    REPLACE = 'R'
+    """
+    A TRUNCATE followed by the new rows.
+    Example could be a case where all data of a patient should be reloaded.
+    A TRUNCATE row would be sent to all tables to remove the data and all new data is inserted. But to indicate that
+    this was done via a truncate-replace, the rows are not flagged as INSERT but REPLACE.
+     
+    Note that an UPSERT would not work in such scenarios as a patient might have had 10 diagnosis rows but
+    meanwhile just 9. The UPSERT would not modify record #10, the truncate on the other hand deletes all 10 records
+    and re-inserts 9 records.
+    """
+
+CHANGE_TYPE = "__change_type"
+CHANGE_TYPE_COLUMN = '"__change_type"'
+
+
+
+def create_join_condition(pk_list: Iterable[str], qualifier_left: Union[None,str], qualifier_right: Union[None,str]):
+    condition_str = ""
+    l = ""
+    if qualifier_left is not None:
+        l = qualifier_left + "."
+    r = ""
+    if qualifier_right is not None:
+        r = qualifier_right + "."
+    for pk in pk_list:
+        c = quote_str(pk)
+        if len(condition_str) > 0:
+            condition_str += " and "
+        condition_str += f"{l}{c} = {r}{c}"
+    return condition_str
 
 
 class TableComparison:
@@ -59,8 +130,6 @@ class TableComparison:
         if empty(source_pk_list):
             source_pk_list = None
         if source_pk_list is None and not source.is_persisted():
-            logger.error(f"table_comparison() - No logical primary key provided, and cannot be read as "
-                         f"the source is a select statement")
             raise RuntimeError(
                 f"table_comparison() - No logical primary key provided, and cannot be read as "
                 f"the source is a select statement")
@@ -75,34 +144,36 @@ class TableComparison:
         self.termination_date = termination_date
         if self.termination_date is None:
             self.termination_date = datetime.strptime('9999-12-31', '%Y-%m-%d')
-        self.output_table = Dataset(self.source.dataset_name + "_tc", self.source.dataset_name + "_tc", True)
+        self.output_table = Dataset(self.source.dataset_name + "_tc", self.source.dataset_name + "_tc",
+                                    True, source_pk_list)
+        self.last_execution: Union[None, OperationalMetadata] = None
 
     def execute(self, duckdb):
+        self.logger.info(f"TableComparison() - Started for {self.source.dataset_name}")
         if self.source_pk_list is None:
-            self.logger.debug(f"table_comparison() - No logical primary key provided, reading the pk of "
+            self.logger.debug(f"TableComparison() - No logical primary key provided, reading the pk of "
                               f"the source table {self.source}...")
             self.source_pk_list = get_table_primary_key(duckdb, self.logger, self.source.table_name)
 
             if self.source_pk_list is None:
-                self.logger.error(
-                    "table_comparison() - Comparison requires primary keys to know the where-condition of the update and delete statement")
                 raise RuntimeError(
                     "Table Comparison requires the source_table_pk_list to find the matching row in the comparison table")
             else:
-                self.logger.debug(f"table_comparison() - Source table {self.source} has the "
+                self.logger.debug(f"TableComparison() - Source table {self.source} has the "
                                   f"primary key columns {self.source_pk_list}")
+                self.output_table.logical_pk_list = self.source_pk_list
 
+        self.last_execution = OperationalMetadata()
 
         input_pks_str = convert_list_to_str(self.source_pk_list)
         input_columns = get_cols(duckdb, self.source)
-        input_columns.discard(
-            '"__change_type"')  # in case the target table stores the change type, do not compare on that
+        input_columns.discard(CHANGE_TYPE_COLUMN)  # in case the target table stores the change type, do not compare on that
         input_fields_str_s = convert_list_to_str(input_columns, "s")
         comparison_table_columns = get_cols(duckdb, self.comparison)
         # The change type column, if present in the target, is always ignored in the comparison and also not selected from
-        if '"__change_type"' in comparison_table_columns:
+        if CHANGE_TYPE_COLUMN in comparison_table_columns:
             comparison_table_has_change_type = True
-            comparison_table_columns.discard('"__change_type"')
+            comparison_table_columns.discard(CHANGE_TYPE_COLUMN)
         else:
             comparison_table_has_change_type = False
 
@@ -119,12 +190,7 @@ class TableComparison:
         additional_fields_str_t = convert_list_to_str(additional_columns, "t")
         if additional_fields_str_t is not None and len(additional_fields_str_t) > 0:
             additional_fields_str_t = ", " + additional_fields_str_t
-        join_condition_s_t = ""
-        for pk in self.source_pk_list:
-            c = quote_str(pk)
-            if len(join_condition_s_t) > 0:
-                join_condition_s_t += " and "
-            join_condition_s_t += f"s.{c} = t.{c}"
+        join_condition_s_t = create_join_condition(self.source_pk_list, "s", "t")
         join_condition_k_t = join_condition_s_t.replace('s.', 'k.')
 
         order_clause = ""
@@ -136,44 +202,51 @@ class TableComparison:
         select = f"""
         with comparison_table as {self.comparison.get_sub_select_clause()},
         current_version as (select * from
-            (select *, row_number() over (partition by {input_pks_str} {order_clause}) as \"__rownumber\" from comparison_table {tc_filter})
-            where \"__rownumber\" = 1
+                                (select *, row_number() over (partition by {input_pks_str} {order_clause}) as \"__rownumber\" 
+                                 from comparison_table {tc_filter}
+                                )
+                            where \"__rownumber\" = 1
         ),
         source as {self.source.get_sub_select_clause()},
         changed as (select {compare_columns_str} from source as s
                     except
                     select {compare_columns_str} from current_version as s
         )
-        select {input_fields_str_s}{additional_columns_projection}, 'I' as \"__change_type\" from source as s where ({input_pks_str}) not in (select {input_pks_str} from current_version)
+        select {input_fields_str_s}{additional_columns_projection}, '{RowType.INSERT.value}' as {CHANGE_TYPE_COLUMN} from source as s where ({input_pks_str}) not in (select {input_pks_str} from current_version)
         union all
-        select {input_fields_str_s}{additional_fields_str_t}, 'U' as \"__change_type\" from source as s join current_version as t on {join_condition_s_t} join changed k on {join_condition_k_t}
+        select {input_fields_str_s}{additional_fields_str_t}, '{RowType.UPDATE.value}' as {CHANGE_TYPE_COLUMN} from source as s join current_version as t on {join_condition_s_t} join changed k on {join_condition_k_t}
         """
         if self.before_image:
             select += f"""
                 union all
-                select {input_fields_str_s.replace('s.', 't.')}{additional_fields_str_t}, 'B' as \"__change_type\" from source as s join current_version as t on {join_condition_s_t} join changed k on {join_condition_k_t}
+                select {input_fields_str_s.replace('s.', 't.')}{additional_fields_str_t},
+                    '{RowType.BEFORE.value}' as {CHANGE_TYPE_COLUMN}
+                from source as s join current_version as t on {join_condition_s_t} join changed k on {join_condition_k_t}
             """
         if self.detect_deletes:
             select += f"""
                 union all
-                select {input_fields_str_s}{additional_fields_str_t.replace("t.", "s.")}, 'D' as \"__change_type\" from comparison_table as s
+                select {input_fields_str_s}{additional_fields_str_t.replace("t.", "s.")},
+                    '{RowType.DELETE.value}' as {CHANGE_TYPE_COLUMN} from comparison_table as s
                 where ({input_pks_str}) not in (select {input_pks_str} from source)
             """
         output_table_str = quote_str(self.output_table.table_name)
         sql = f"CREATE OR REPLACE TABLE {output_table_str} AS FROM {self.comparison.get_sub_select_clause()} with no data"
-        self.logger.debug(f"table_comparison() - Create output table {output_table_str} via the sql statement <{sql}>")
+        self.logger.debug(f"TableComparison() - Create output table {output_table_str} via the sql statement <{sql}>")
         duckdb.execute(sql)
         if not comparison_table_has_change_type:
-            sql = f"ALTER TABLE {output_table_str} add \"__change_type\" varchar(1)"
-            self.logger.debug("table_comparison() - Adding the change_type column to the output table <{sql}>")
+            sql = f"ALTER TABLE {output_table_str} add {CHANGE_TYPE_COLUMN} varchar(1)"
+            self.logger.debug("TableComparison() - Adding the change_type column to the output table <{sql}>")
             duckdb.execute(sql)
         output_list = input_fields_str_s.replace('s.', "") + additional_fields_str_t.replace('t.',
-                                                                                             "") + ", \"__change_type\""
+                                                                                             "") + f", {CHANGE_TYPE_COLUMN}"
         sql = f"insert into {output_table_str}({output_list}) {select}"
-        self.logger.debug(
-            f"table_comparison() - Executing the SQL statement to identify the delta and split into insert and update records via the sql statement <{sql}>")
+        self.logger.debug(f"TableComparison() - Executing the SQL statement to identify the delta and "
+                          f"split into insert and update records via the sql statement <{sql}>")
         duckdb.execute(sql, [self.termination_date])
-
+        res = duckdb.execute(f"select count(*) from {output_table_str}").fetchall()
+        self.last_execution.processed(res[0][0])
+        self.logger.info(self.last_execution)
 
 class SCD2:
 
@@ -235,49 +308,55 @@ class SCD2:
         self.current_flag_column = current_flag_column
         self.current_flag_set = current_flag_set
         self.current_flag_unset = current_flag_unset
+        self.last_execution: Union[None, OperationalMetadata] = None
 
     def execute(self, duckdb):
+        self.logger.info(f"SCD2() - Started for {self.source.dataset_name}")
+        self.last_execution = OperationalMetadata()
         source_table = quote_str(self.source.table_name)
         if self.current_flag_column is not None:
             sql = f"""
             update {source_table} set 
             {quote_str(self.start_date_column)} = 
-                case when \"__change_type\" = 'I' then ifnull({quote_str(self.start_date_column)}, $1)
-                when \"__change_type\" = 'U' then $1
-                when \"__change_type\" = 'B' or \"__change_type\" = 'D' then {quote_str(self.start_date_column)}
+                case when {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}' then ifnull({quote_str(self.start_date_column)}, $1)
+                when {CHANGE_TYPE_COLUMN} = '{RowType.UPDATE.value}' then $1
+                when {CHANGE_TYPE_COLUMN} = '{RowType.BEFORE.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.DELETE.value}' then {quote_str(self.start_date_column)}
                 end,
             {quote_str(self.end_date_column)} = 
-                case when \"__change_type\" = 'I' or \"__change_type\" = 'U' then $3
-                when \"__change_type\" = 'B' or \"__change_type\" = 'D' then $2
+                case when {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.UPDATE.value}' then $3
+                when {CHANGE_TYPE_COLUMN} = '{RowType.BEFORE.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.DELETE.value}' then $2
                 end,
             {quote_str(self.current_flag_column)} = 
-                case when \"__change_type\" = 'I' or \"__change_type\" = 'U' then $4
-                when \"__change_type\" = 'B' or \"__change_type\" = 'D' then $5
+                case when {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.UPDATE.value}' then $4
+                when {CHANGE_TYPE_COLUMN} = '{RowType.BEFORE.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.DELETE.value}' then $5
                 end,
-            \"__change_type\" = 
-                case when \"__change_type\" = 'I' or \"__change_type\" = 'U' then 'I'
-                when \"__change_type\" = 'B' or \"__change_type\" = 'D' then 'U'
+            {CHANGE_TYPE_COLUMN} = 
+                case when {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.UPDATE.value}' then '{RowType.INSERT.value}'
+                when {CHANGE_TYPE_COLUMN} = '{RowType.BEFORE.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.DELETE.value}' then '{RowType.UPDATE.value}'
                 end
             """
         else:
             sql = f"""
             update {source_table} set 
             {quote_str(self.start_date_column)} = 
-                case when \"__change_type\" = 'I' or \"__change_type\" = 'U' then $1
-                when \"__change_type\" = 'B' or \"__change_type\" = 'D' then {quote_str(self.start_date_column)}
+                case when {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}' then ifnull({quote_str(self.start_date_column)}, $1)
+                when {CHANGE_TYPE_COLUMN} = '{RowType.UPDATE.value}' then $1
+                when {CHANGE_TYPE_COLUMN} = '{RowType.BEFORE.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.DELETE.value}' then {quote_str(self.start_date_column)}
                 end,
             {quote_str(self.end_date_column)} = 
-                case when \"__change_type\" = 'I' or \"__change_type\" = 'U' then $3
-                when \"__change_type\" = 'B' or \"__change_type\" = 'D' then $2
+                case when {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.UPDATE.value}' then $3
+                when {CHANGE_TYPE_COLUMN} = '{RowType.BEFORE.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.DELETE.value}' then $2
                 end,
-            \"__change_type\" = 
-                case when \"__change_type\" = 'I' or \"__change_type\" = 'U' then 'I'
-                when \"__change_type\" = 'B' or \"__change_type\" = 'D' then 'U'
+            {CHANGE_TYPE_COLUMN} = 
+                case when {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.UPDATE.value}' then '{RowType.INSERT.value}'
+                when {CHANGE_TYPE_COLUMN} = '{RowType.BEFORE.value}' or {CHANGE_TYPE_COLUMN} = '{RowType.DELETE.value}' then '{RowType.UPDATE.value}'
                 end
             """
-        self.logger.debug(f"scd2() - Converting the CDC info of table {source_table} into SCD2 info: <{sql}>")
+        self.logger.debug(f"SCD2() - Converting the CDC info of table {source_table} into SCD2 info: <{sql}>")
         duckdb.execute(sql, [self.start_date, self.end_date, self.termination_date, self.current_flag_set, self.current_flag_unset])
-
+        res = duckdb.execute(f"select count(*) from {source_table}").fetchall()
+        self.last_execution.processed(res[0][0])
+        self.logger.info(self.last_execution)
 
 class GenerateKey:
 
@@ -311,8 +390,11 @@ class GenerateKey:
         self.surrogate_key_column = surrogate_key_column
         self.start_value = start_value
         self.target = target
+        self.last_execution: Union[None, OperationalMetadata] = None
 
     def execute(self, duckdb):
+        self.logger.info(f"GenerateKey() - Started for {self.cdc_table.dataset_name}")
+        self.last_execution = OperationalMetadata()
         if self.surrogate_key_column is None:
             pks = get_table_primary_key(duckdb, self.logger, self.target.table_name)
             if pks is None:
@@ -331,7 +413,7 @@ class GenerateKey:
             else:
                 sql = f"select max({quote_str(self.surrogate_key_column)}) from {quote_str(self.target.table_name)}"
                 self.logger.debug(
-                    f"generate_key() - No start value provided, reading the max({self.surrogate_key_column}) value "
+                    f"GenerateKey() - No start value provided, reading the max({self.surrogate_key_column}) value "
                     f"from {self.target.table_name}: <{sql}>")
                 res = duckdb.execute(sql).fetchall()
                 start_value = res[0][0]
@@ -341,10 +423,99 @@ class GenerateKey:
                     start_value += 1
         sequence_name = self.target.table_name + "_seq"
         sql = f"create or replace sequence {quote_str(sequence_name)} start {start_value}"
-        self.logger.debug(f"generate_key() - Creating the sequence for the key: <{sql}>")
+        self.logger.debug(f"GenerateKey() - Creating the sequence for the key: <{sql}>")
         duckdb.execute(sql)
-        self.logger.debug(f"generate_key() - Updating the key for all insert rows: <{sql}>")
         sql = (f"update {quote_str(self.cdc_table.table_name)} set "
                f"{quote_str(self.surrogate_key_column)} = nextval('{sequence_name}') "
-               f"where \"__change_type\" = 'I'")
+               f"where {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}'")
+        self.logger.debug(f"GenerateKey() - Updating the key for all insert rows: <{sql}>")
         duckdb.execute(sql)
+        res = duckdb.execute(f"select count(*) from {quote_str(self.cdc_table.table_name)} where {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}'").fetchall()
+        self.last_execution.processed(res[0][0])
+        self.logger.info(self.last_execution)
+
+
+class CDCOperation:
+
+    def __init__(self, cdc_table: Dataset, logical_pk_list: Union[None, Iterable[str]] = None,
+                 map_insert_to: str = None, map_update_to: str = None, map_before_to: str = None, map_delete_to: str = None,
+                 column_expressions: Union[None, dict[str, str]] = None, logger: Union[None, Logger] = None):
+        """
+        Allows to modify the change type flag and to set values based on the before image.
+        For example, TableComparison found out the new and changed records but all records should be inserted into
+        the target. Hence the map_update_to is set to 'I'.
+
+        :param cdc_table:
+        :param logical_pk_list:
+        :param map_insert_to:
+        :param map_update_to:
+        :param map_before_to:
+        :param map_delete_to:
+        :param column_expressions:
+        """
+        if not cdc_table.is_cdc:
+            raise RuntimeError("Input dataset must be a CDC table")
+        if not cdc_table.is_persisted():
+            raise RuntimeError("Input dataset must be a persisted table")
+        if logger is None:
+            self.logger = logging.getLogger("TableComparison")
+        else:
+            self.logger = logger
+        self.cdc_table = cdc_table
+        self.map_insert_to = map_insert_to
+        self.map_update_to = map_update_to
+        self.map_before_to = map_before_to
+        self.map_delete_to = map_delete_to
+        self.column_expressions = column_expressions
+        self.logical_pk_list = logical_pk_list
+        if logical_pk_list is None:
+            self.logical_pk_list = cdc_table.logical_pk_list
+        self.last_execution = None
+
+
+    def execute(self, duckdb):
+        self.logger.info(f"CDCOperation() - Started for {self.cdc_table.dataset_name}")
+        self.last_execution = OperationalMetadata()
+        mapping_str = ""
+        mappings = {
+            '{RowType.INSERT.value}': self.map_insert_to,
+            '{RowType.UPDATE.value}': self.map_update_to,
+            '{RowType.BEFORE.value}': self.map_before_to,
+            '{RowType.DELETE.value}': self.map_delete_to
+        }
+        for key, value in mappings.items():
+            if value is not None:
+                if len(mapping_str) > 0:
+                    mapping_str += ", "
+                mapping_str += f"when {CHANGE_TYPE_COLUMN} = '{key}' then '{value}'"
+        expression_str = ""
+        if self.column_expressions is not None:
+            for key, value in self.column_expressions.items():
+                if len(expression_str) > 0:
+                    expression_str += ", "
+                expression_str += f"set {quote_str(key)} = {value}"
+
+        sql = f"""
+            update {quote_str(self.cdc_table.table_name)}
+        """
+        if len(mapping_str) > 0:
+            sql += f"""
+                {CHANGE_TYPE_COLUMN} = case {mapping_str} else {CHANGE_TYPE_COLUMN} end
+            """
+        if self.column_expressions is not None:
+            if self.logical_pk_list is None or empty(self.logical_pk_list):
+                raise RuntimeError("For expressions the logical PK must be specified to know "
+                                   "which before image belongs to what after image")
+            join_condition = create_join_condition(self.logical_pk_list, None, "b")
+            join_condition += " and b.{CHANGE_TYPE_COLUMN} = '{RowType.BEFORE.value}'"
+            if len(mapping_str) > 0:
+                sql += ", "
+            sql += f"""
+                {expression_str}
+                left join {quote_str(self.cdc_table.table_name)} b on {join_condition}
+            """
+        duckdb.execute(sql)
+        self.logger.debug(f"CDCOperation() - Updating the table with: <{sql}>")
+        res = duckdb.execute(f"select count(*) from {quote_str(self.cdc_table.table_name)}").fetchall()
+        self.last_execution.processed(res[0][0])
+        self.logger.info(self.last_execution)

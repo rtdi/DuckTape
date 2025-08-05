@@ -13,9 +13,9 @@ Let's build a data integration tool based on Python for flexibility and DuckDB f
     - Via prompt - The user feeds the functional spec and the code is generated.
 
 ## Transforms
- - Table Comparison: Take an input dataset (normal or CDC), compare with the target and create a delta dataset. This tells which records must be inserted, updated, optionally deleted and does remove all records that gave not been changed.
+ - Table Comparison: Take an input dataset (normal or CDC), compare with the target and create a delta dataset. This tells which records must be inserted, updated, optionally deleted and does remove all records that have not been changed.
  - SCD2 Generation: Take a CDC input and provide the changes to be applied in the target, e.g. Change the current version to an end-date of today and create create a new version with start-date today.
- - Pivot/Unpivot: Turn a dataset with multiple columnms into a dataset with multiple rows and vice versa, including multiple sets. Example: Source has 12 columns for REVENUE_JAN, REVENUE_FEB,... and 12 columns for QTY_JAN, QTY_FEB,... Result should be 12 rows for each input row.
+ - Pivot/Unpivot: Turn a dataset with multiple columns into a dataset with multiple rows and vice versa, including multiple sets. Example: Source has 12 columns for REVENUE_JAN, REVENUE_FEB,... and 12 columns for QTY_JAN, QTY_FEB,... Result should be 12 rows for each input row.
  - Hierarchy handling: Multiple transforms to deal with parent_child hierarchy tables, hierarchy column (City, region, country) and convert between these representations. Also validate hierarchies to ensure there are no loops in a parent child based hierarchy.
  - Temporal Join: Two datasets must be joined and each as a valid-from/valid-to date. Create a list of dates when something changed and join the data from both tables.
  - CDC operations: A transform capable of changing the CDC information and do calculations on the change data. Example: If the ACCOUNT_BALANCE changed from 100USD to 500USD, what is the increase? The after image value minus the before image value.

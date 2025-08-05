@@ -1,4 +1,7 @@
-from typing import Union
+import datetime
+from datetime import timezone
+from logging import Logger
+from typing import Union, Iterable
 
 from SQLUtils import quote_str, convert_list_to_str
 
@@ -6,14 +9,29 @@ from SQLUtils import quote_str, convert_list_to_str
 class OperationalMetadata:
 
     def __init__(self):
-        self.rows_processed = 0 # type int
+        self.rows_processed: int = 0
+        self.start_time: datetime = datetime.datetime.now(timezone.utc)
+        self.end_time: datetime = None
+        self.execution_time: int = 0
 
+    def processed(self, rows_processed: int):
+        self.rows_processed = rows_processed
+        self.end_time = datetime.datetime.now(timezone.utc)
+        delta = self.end_time - self.start_time
+        self.execution_time = delta.total_seconds()
 
+    def __str__(self):
+        throughput = None
+        if self.execution_time > 0:
+            throughput = self.rows_processed / self.execution_time
+        return (f"started at {self.start_time}, ended at {self.end_time}, duration {self.execution_time}s, "
+                f"rows processed {self.rows_processed}, throughput {throughput:.0f}rows/sec")
 
 
 class Dataset:
 
-    def __init__(self, dataset_name: str, from_clause: str, is_cdc: bool = False):
+    def __init__(self, dataset_name: str, from_clause: str, is_cdc: bool = False,
+                 logical_pk_list: Union[None, Iterable[str]] = None):
         if from_clause is None:
             raise RuntimeError("Either the table name or the select statement must be specified as from clause")
         self.table_name = None
@@ -26,6 +44,7 @@ class Dataset:
         self.dataset_name = dataset_name
         self.show_projection = "*"
         self.where_clause = None
+        self.logical_pk_list = logical_pk_list
 
     def is_persisted(self):
         return self.table_name is not None
@@ -42,7 +61,7 @@ class Dataset:
     def set_show_where_clause(self, clause):
         self.where_clause = clause
 
-    def show(self, duckdb):
+    def show(self, duckdb, logger: Logger, heading: Union[None, str] = None):
         where = ""
         if self.where_clause is not None:
             where = " where " + self.where_clause
@@ -50,8 +69,10 @@ class Dataset:
         with tab as {self.get_sub_select_clause()}
         select {self.show_projection} from tab {where}
         """
+        if heading is not None:
+            logger.debug(heading)
         if self.is_persisted():
-            print(f"Table: {self.table_name}")
+            logger.debug(f"Table: {self.table_name}")
         else:
             print(self.sql)
-        print(duckdb.sql(sql).show(max_width=200))
+        logger.debug(duckdb.sql(sql).show(max_width=200))
