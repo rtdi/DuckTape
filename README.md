@@ -4,7 +4,7 @@ Let's build a data integration tool based on Python for flexibility and DuckDB f
 ## Scope
 
  1. Python and DuckDB can be used to read data into DuckDB. Within DuckDB SQL based transformations are applied. The result is written into a Target, again either using DuckDB's native features or Python. `Source --> DuckDB --> SQL --> Target`
- 2. Delta handling as a first class citicen, meaning the structure supports before and after image, change indicators, can create the delta by comparing with the target and can be connected to CDC readers
+ 2. Delta handling as a first class citizen, meaning the structure supports before and after image, change indicators, can create the delta by comparing with the target and can be connected to CDC readers
  3. Certain transformations are hard to do in SQL, either because the SQL statement is complicated, or it can be expressed in 3GL code more easily or it needs multiple SQL statements. For these Python methods are implemented to achieve these transformations with a single function call.
  4. User interaction levels are
     - Via code - The user writes the Python code and thanks to the APIs, can be very quick.
@@ -21,6 +21,13 @@ Let's build a data integration tool based on Python for flexibility and DuckDB f
  - CDC operations: A transform capable of changing the CDC information and do calculations on the change data. Example: If the ACCOUNT_BALANCE changed from 100USD to 500USD, what is the increase? The after image value minus the before image value.
  - Address validation: Pass an address to an external service like Google Maps API to validate, correct and standardize the address.
  - Data Validation: Apply rules to the data and check if the record does as PASS/FAIL/WARN for each rule and overall.
+ - lookup: Find the matching record in another table and handle cases where the lookup table returns multiple candidates
+
+## Qualities
+
+ - Schema evolution
+ - automatic create table
+ - Logical validation
 
 ## Operational Metadata and Validation
  - Each dataflow creates operational statistics, rows read, rows outputted, execution time, number of PASS/FAIL/WARN records.

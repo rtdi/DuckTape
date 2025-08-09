@@ -17,14 +17,17 @@ def convert_list_to_str(values: Iterable[str], qualifier: str = None) -> str:
     :return:
     """
     output_str = ""
-    for field in values:
-        if len(output_str) > 0:
-            output_str += ", "
-        if qualifier is not None:
-            output_str += f"{qualifier}.{field}"
-        else:
-            output_str += field
-    return output_str
+    if values is not None:
+        for field in values:
+            if len(output_str) > 0:
+                output_str += ", "
+            if qualifier is not None:
+                output_str += f"{qualifier}.{field}"
+            else:
+                output_str += field
+        return output_str
+    else:
+        return None
 
 
 def get_table_cols(db, table_name: str) -> set[str]:
