@@ -7,7 +7,7 @@ from logging import Logger
 from typing import Union, Iterable
 import re
 
-from SQLUtils import quote_str, convert_list_to_str, get_table_cols
+from .SQLUtils import quote_str, convert_list_to_str
 
 
 class OperationalMetadata:
@@ -25,7 +25,7 @@ class OperationalMetadata:
         self.execution_time = delta.total_seconds()
 
     def __str__(self):
-        throughput = None
+        throughput = 0
         if self.execution_time > 0:
             throughput = self.rows_processed / self.execution_time
         return (f"started at {self.start_time}, ended at {self.end_time}, duration {self.execution_time}s, "
@@ -34,22 +34,77 @@ class OperationalMetadata:
 
 class Step(ABC):
 
-    def __init__(self):
-        self.name: Union[None, str] = None
+    def __init__(self, name: str):
+        self.name: str = name
         self.description: Union[None, str] = None
         self.impact_lineage = None
+        self.inputs: Union[None, set[Step]] = None
+        self.outputs: Union[None, set[Step]] = None
+        self.executed: bool = False
+        self.execute_lock: bool = False
+        self.last_execution: Union[None, OperationalMetadata] = None
+
+    def add_input(self, step: "Step"):
+        if self.inputs is None:
+            self.inputs = {step}
+            step.add_output(self)
+        elif step in self.inputs:
+            return
+        else:
+            self.inputs.add(step)
+            step.add_output(self)
+
+    def add_output(self, step: "Step"):
+        if self.outputs is None:
+            self.outputs = {step}
+            step.add_input(self)
+        elif step in self.outputs:
+            return
+        else:
+            self.outputs.add(step)
+            step.add_input(self)
+
+    def start(self, duckdb):
+        self.execute_lock = True
+        if not self.executed:
+            if self.inputs is not None:
+                for step in self.inputs:
+                    if not step.executed and not step.execute_lock:
+                        step.start(duckdb)
+            self.execute(duckdb)
+            self.executed = True
+        if self.outputs is not None:
+            for step in self.outputs:
+                if not step.executed and not step.execute_lock:
+                    step.start(duckdb)
+
+
+    def completed(self):
+        if self.executed:
+            if self.inputs is not None:
+                for step in self.inputs:
+                    if step.executed:
+                        step.completed()
+        self.executed = False
+        self.execute_lock = False
+        if self.outputs is not None:
+            for step in self.outputs:
+                if step.executed:
+                    step.completed()
 
     @abstractmethod
-    def generate_columns(self, duckdb):
+    def execute(self, duckdb):
         pass
+
+    def __str__(self):
+        return self.name
 
 
 class Dataset(Step, ABC):
 
     def __init__(self, dataset_name: str, is_cdc: bool = False,
                  logical_pk_list: Union[None, Iterable[str]] = None):
-        super().__init__()
-        self.dataset_name = dataset_name
+        super().__init__(dataset_name)
         self.show_projection = "*"
         self.where_clause = None
         self.logical_pk_list = logical_pk_list
@@ -92,11 +147,14 @@ class Dataset(Step, ABC):
         """
         return duckdb.execute(sql).fetchall()
 
+    def execute(self, duckdb):
+        pass
+
 
 class Table(Dataset):
 
     def __init__(self, dataset_name: str, table_name: str, is_cdc: bool = False,
-                 pk_list: Union[None, Iterable[str]] = None, allow_evolution: Union[None, bool] = False):
+                 pk_list: Union[None, Iterable[str]] = None, allow_evolution: bool = False):
         super().__init__(dataset_name, is_cdc, pk_list)
         self.table_name = table_name
         self.cols: Union[None, OrderedDict[str, str]] = None
@@ -140,6 +198,9 @@ class Table(Dataset):
             for fields in metadata:
                 name = fields[0]
                 datatype = fields[1]
+                match datatype:
+                    case 'NUMBER':
+                        datatype = 'decimal(38,7)' # DuckDB does not provide any additional information - it cannot
                 self.add_column(name, f"{datatype}")
 
     def create_table(self, duckdb):
@@ -158,11 +219,39 @@ class Table(Dataset):
         create_str += ")"
         duckdb.execute(create_str)
 
-    def generate_columns(self, duckdb):
-        cols = get_table_cols(duckdb, self.table_name)
-        if cols is None or len(cols) == 0:
-            pass
+    def set_logical_pk_list(self, logical_pk_list: Union[None, Iterable[str]] = None):
+        self.logical_pk_list = logical_pk_list
 
+
+class TableSynonym(Table):
+
+    def __init__(self, name: str, table: Table):
+        super().__init__(name, table.table_name, table.is_cdc, table.logical_pk_list)
+        self.synonym_for = table
+
+    def create_table(self, duckdb):
+        raise RuntimeError(f"This is a synonym for {self.synonym_for.table_name}")
+
+    def is_persisted(self):
+        return self.synonym_for.is_persisted()
+
+    def get_sub_select_clause(self) -> str:
+        return self.synonym_for.get_sub_select_clause()
+
+    def add_column(self, column_name: str, column_datatype: str):
+        raise RuntimeError(f"This is a synonym for {self.synonym_for.table_name}")
+
+    def add_all_columns(self, source: Dataset, duckdb):
+        raise RuntimeError(f"This is a synonym for {self.synonym_for.table_name}")
+
+    def show(self, duckdb, logger: Logger, heading: Union[None, str] = None):
+        self.synonym_for.show(duckdb, logger, heading)
+
+    def get_show_data(self, duckdb):
+        self.synonym_for.get_show_data(duckdb)
+
+    def set_logical_pk_list(self, logical_pk_list: Union[None, Iterable[str]] = None):
+        self.synonym_for.set_logical_pk_list(logical_pk_list)
 
 
 class Query(Dataset):
@@ -171,11 +260,13 @@ class Query(Dataset):
                  logical_pk_list: Union[None, Iterable[str]] = None):
         super().__init__(dataset_name, is_cdc, logical_pk_list)
         self.sql = sql
-        self.inputs = inputs
+        if inputs is not None:
+            for i in inputs:
+                self.add_input(i)
         regex = r"\{\w*\}"
         matches = re.finditer(regex, sql, re.MULTILINE)
         if self.inputs is not None:
-            keys = {x.dataset_name for x in inputs}
+            keys = {x.name for x in inputs}
             not_found_keys = []
             for match in matches:
                 parameter = match.group(0)[1:-1]
@@ -200,11 +291,8 @@ class Query(Dataset):
         sql = self.sql
         if self.inputs is not None:
             for i in self.inputs:
-                sql = sql.replace("{" + i.dataset_name + "}", i.get_sub_select_clause())
+                sql = sql.replace("{" + i.name + "}", i.get_sub_select_clause())
         return f"({sql})"
-
-    def generate_columns(self, duckdb):
-        pass
 
 
 class RowType(Enum):

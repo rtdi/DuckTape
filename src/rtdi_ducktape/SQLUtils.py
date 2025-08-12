@@ -9,7 +9,7 @@ def quote_str(name: str) -> Union[None, str]:
         return '"' + name + '"'
 
 
-def convert_list_to_str(values: Iterable[str], qualifier: str = None) -> str:
+def convert_list_to_str(values: Iterable[str], qualifier: str = None) -> Union[None, str]:
     """
     Turns the list of strings into a comma separated single string, optionally with qualifier
     :param values:

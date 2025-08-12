@@ -1,14 +1,20 @@
 import logging
+from abc import ABC
 from logging import Logger
 from typing import Union, Iterable
 
-from Metadata import Dataset, Table
-from SQLUtils import empty, get_table_primary_key, get_table_cols, convert_list_to_str, quote_str
+from .Metadata import Dataset, Table, Step, OperationalMetadata
+from .SQLUtils import get_table_primary_key, get_table_cols, convert_list_to_str, quote_str
 
+class Loader(Step, ABC):
 
-class DuckDBApplier:
+    def __init__(self, name: Union[None, str] = None):
+        super().__init__(name)
 
-    def __init__(self, source: Dataset, target: Table, target_pk_list: Union[None, Iterable[str]] = None,
+class DuckDBApplier(Loader):
+
+    def __init__(self, source: Dataset, target: Table, name: Union[None, str] = None,
+                 target_pk_list: Union[None, Iterable[str]] = None,
                  logger: Union[None, Logger] = None):
         """
         Write the data into the target table. If the source dataset is a CDC source, perform the insert-update-delete
@@ -21,18 +27,22 @@ class DuckDBApplier:
         :param target_pk_list: optional pk list in case the target does not support PKs
         :param logger: logger
         """
+        if name is None:
+            name = f"Loader for {target.name}"
+        super().__init__(name)
         if not isinstance(target, Table):
             raise RuntimeError(f"Target {target} must be a table")
         if logger is None:
             self.logger = logging.getLogger("TableComparison")
         else:
             self.logger = logger
-
+        self.add_input(source)
         self.source = source
         self.target = target
         self.target_pk_list = target_pk_list
 
     def execute(self, duckdb):
+        self.last_execution = OperationalMetadata()
         target_table = self.target.table_name
         target_table_name = quote_str(target_table)
         if self.target_pk_list is None:
@@ -79,6 +89,11 @@ class DuckDBApplier:
                 """
             self.logger.debug(f"DuckDBApplier() - Delete all __change_type='D' rows in the target via the SQL <{sql}>")
             duckdb.execute(sql)
+            res = duckdb.execute(f"""
+                with source as ({self.source.get_sub_select_clause()})
+                select count(*) from source""").fetchall()
+            self.last_execution.processed(res[0][0])
+            self.logger.info(f"DuckDBApplier() - {self.last_execution}")
         else:
             pk = get_table_primary_key(duckdb, self.logger, target_table)
             if pk is not None:
@@ -88,5 +103,22 @@ class DuckDBApplier:
                     """
                 self.logger.debug(f"DuckDBApplier() - Upsert all rows via the SQL <{sql}>")
                 duckdb.execute(sql)
+                res = duckdb.execute(f"""
+                    with source as ({self.source.get_sub_select_clause()})
+                    select count(*) from source""").fetchall()
+                self.last_execution.processed(res[0][0])
+                self.logger.info(f"DuckDBApplier() - {self.last_execution}")
+            else:
+                sql = f"""with source as ({self.source.get_sub_select_clause()}) 
+                       INSERT INTO {target_table_name}({cols_str})
+                       SELECT {cols_str} from source
+                    """
+                self.logger.debug(f"DuckDBApplier() - Insert all rows via the SQL <{sql}>")
+                duckdb.execute(sql)
+                res = duckdb.execute(f"""
+                    with source as ({self.source.get_sub_select_clause()})
+                    select count(*) from source""").fetchall()
+                self.last_execution.processed(res[0][0])
+                self.logger.info(f"DuckDBApplier() - {self.last_execution}")
 
 
