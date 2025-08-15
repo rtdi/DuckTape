@@ -1,1 +1,4 @@
 duckdb
+rtdi_ducktape
+deltalake
+pyarrow

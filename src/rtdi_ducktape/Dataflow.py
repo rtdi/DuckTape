@@ -2,9 +2,7 @@ import logging
 from logging import Logger
 from typing import Union
 
-from rtdi_ducktape.Loaders import Loader
-from rtdi_ducktape.Metadata import Step, OperationalMetadata
-from rtdi_ducktape.SQLUtils import empty
+from rtdi_ducktape.Metadata import Step, OperationalMetadata, Table
 
 
 class Dataflow:
@@ -27,7 +25,8 @@ class Dataflow:
             self.nodes[0].start(duckdb)
             rows_loaded = 0
             for node in self.nodes:
-                if isinstance(node, Loader) and node.last_execution is not None:
+                if isinstance(node, Table) and node.last_execution is not None:
                     rows_loaded += node.last_execution.rows_processed
             self.last_execution.processed(rows_loaded)
+            self.nodes[0].completed()
             self.logger.info(f"Dataflow() - {self.last_execution}")

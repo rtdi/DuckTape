@@ -3,17 +3,19 @@ from datetime import datetime, timezone
 from logging import Logger
 from typing import Union, Iterable
 
-from .SQLUtils import quote_str, convert_list_to_str, get_cols, get_table_primary_key, empty, get_first, get_count
+import pyarrow as pa
+
 from .Metadata import Dataset, OperationalMetadata, Table, RowType, create_join_condition, TableSynonym
+from .SQLUtils import quote_str, convert_list_to_str, empty, get_first, get_count
 
 CHANGE_TYPE = "__change_type"
 CHANGE_TYPE_COLUMN = '"__change_type"'
 
 
-class TableComparison(Table):
+class Comparison(Table):
 
-    def __init__(self, source: Dataset, comparison: Dataset, name: Union[None, str] = None,
-                 source_pk_list: Union[None, Iterable[str]] = None, columns_to_ignore: Union[None, list[str]] = None,
+    def __init__(self, source: Dataset, name: Union[None, str] = None,
+                 logical_pk_list: Union[None, Iterable[str]] = None, columns_to_ignore: Union[None, list[str]] = None,
                  order_column: Union[None, str] = None, before_image: bool = True, detect_deletes: bool = False,
                  end_date_column: Union[None, str] = None, termination_date: Union[None, datetime] = None,
                  logger: Union[None, Logger] = None
@@ -47,8 +49,7 @@ class TableComparison(Table):
            be a new version, instead of comparing with the latest version, the row with an end date of the deletion.
 
         :param source: the table name of the source
-        :param comparison: the name of the table to compare with
-        :param source_pk_list: the list of logical primary keys, if None look for the table's primary key
+        :param logical_pk_list: the list of logical primary keys, if None look for the table's primary key
         :param columns_to_ignore: optional list of columns to ignore in the comparison
         :param order_column: in case the comparison table has multiple records, pick the one with the highest value in
         the order column
@@ -60,24 +61,21 @@ class TableComparison(Table):
         :param logger: Logger of the dataflow
         """
         if logger is None:
-            self.logger = logging.getLogger("TableComparison")
+            self.logger = logging.getLogger("Comparison")
         else:
             self.logger = logger
-        if empty(source_pk_list):
-            source_pk_list = None
-        if source_pk_list is None:
-            source_pk_list = source.logical_pk_list
-        if source_pk_list is None and not source.is_persisted():
-            raise RuntimeError(
-                f"No logical primary key provided, and cannot be read as "
-                f"the source is a select statement")
+        if empty(logical_pk_list):
+            logical_pk_list = None
+        if logical_pk_list is None and source.pk_list is not None:
+            logical_pk_list = source.pk_list
+            self.logger.debug(f"Comparison() - No logical primary key provided, using the pk of "
+                              f"the input {source}: {source.pk_list}")
         if name is None:
-            name = f"TableComparison for table {source.name}_tc"
-        super().__init__(name, source.name + "_tc", True, source_pk_list)
+            name = f"Comparison for table {source.name}_tc"
+        super().__init__(name, source.name + "_tc", True, logical_pk_list)
         self.add_input(source)
         self.source = source
-        self.comparison = comparison
-        self.source_pk_list = source_pk_list
+        self.comparison: Union[None, Dataset] = None
         self.columns_to_ignore = columns_to_ignore
         self.order_column = order_column
         self.before_image = before_image
@@ -94,33 +92,40 @@ class TableComparison(Table):
         self.source = source
         self.add_input(source)
 
-    def execute(self, duckdb):
-        self.logger.info(f"TableComparison() - Started for {self.source.name}")
-        if self.source_pk_list is None:
-            if isinstance(self.source, Table):
-                self.logger.debug(f"TableComparison() - No logical primary key provided, reading the pk of "
-                                  f"the source table {self.source}...")
-                self.source_pk_list = get_table_primary_key(duckdb, self.logger, self.source.table_name)
+    def set_comparison_table(self, comparison: Dataset):
+        self.comparison = comparison
 
-                if self.source_pk_list is None:
-                    raise RuntimeError("Table Comparison requires the source_table_pk_list to find "
-                                       "the matching row in the comparison table")
-                else:
-                    self.logger.debug(f"TableComparison() - Source table {self.source} has the "
-                                      f"primary key columns {self.source_pk_list}")
-                    self.logical_pk_list = self.source_pk_list
-            else:
-                raise RuntimeError("Source is not a table and has no logical PK specified, hence the "
-                                   "source_pk_list must be provided")
+    def execute(self, duckdb):
+        self.logger.info(f"Comparison() - Started for {self.source.name}")
+        if self.pk_list is None:
+            if isinstance(self.comparison, Table):
+                self.logger.debug(f"Comparison() - No logical primary key provided, reading the pk of "
+                                  f"the comparison table {self.comparison}...")
+                self.pk_list = self.comparison.get_table_primary_key(duckdb)
+
+                if self.pk_list is not None:
+                    self.logger.debug(f"Comparison() - Comparison table {self.comparison} has the "
+                                      f"primary key columns {self.pk_list}")
+            elif isinstance(self.source, Table):
+                self.logger.debug(f"Comparison() - No logical primary key provided, reading the pk of "
+                                  f"the source table {self.source}...")
+                self.pk_list = self.source.get_table_primary_key(duckdb)
+
+                if self.pk_list is not None:
+                    self.logger.debug(f"Comparison() - source table {self.source} has the "
+                                      f"primary key columns {self.pk_list}")
+        if self.pk_list is None:
+            raise RuntimeError("No logical PK can be derived from the source or the comparison table, hence the "
+                               "logical_pk_list must be provided")
         self.last_execution = OperationalMetadata()
 
-        input_pks_str = convert_list_to_str(self.source_pk_list)
-        input_columns = get_cols(duckdb, self.source)
-        input_columns.discard(CHANGE_TYPE_COLUMN)  # in case the target table stores the change type, do not compare on that
+        input_pks_str = convert_list_to_str(self.pk_list)
+        input_columns = self.source.get_cols(duckdb)
+        input_columns.discard(CHANGE_TYPE)  # in case the target table stores the change type, do not compare on that
         input_fields_str_s = convert_list_to_str(input_columns, "s")
-        comparison_table_columns = get_cols(duckdb, self.comparison)
+        comparison_table_columns = self.comparison.get_cols(duckdb)
         # The change type column, if present in the target, is always ignored in the comparison and also not selected from
-        if CHANGE_TYPE_COLUMN in comparison_table_columns:
+        if CHANGE_TYPE in comparison_table_columns:
             comparison_table_has_change_type = True
             comparison_table_columns.discard(CHANGE_TYPE_COLUMN)
         else:
@@ -133,13 +138,14 @@ class TableComparison(Table):
         compare_columns_str = convert_list_to_str(compare_columns)
 
         additional_columns = comparison_table_columns.difference(input_columns)
+        additional_columns.discard(CHANGE_TYPE)
         additional_columns_projection = ""
         for field in additional_columns:
             additional_columns_projection += f", null as {field}"
         additional_fields_str_t = convert_list_to_str(additional_columns, "t")
         if additional_fields_str_t is not None and len(additional_fields_str_t) > 0:
             additional_fields_str_t = ", " + additional_fields_str_t
-        join_condition_s_t = create_join_condition(self.source_pk_list, "s", "t")
+        join_condition_s_t = create_join_condition(self.pk_list, "s", "t")
         join_condition_k_t = join_condition_s_t.replace('s.', 'k.')
 
         order_clause = ""
@@ -185,21 +191,24 @@ class TableComparison(Table):
             """
         output_table_str = quote_str(self.table_name)
         sql = f"CREATE OR REPLACE TABLE {output_table_str} AS FROM {self.comparison.get_sub_select_clause()} with no data"
-        self.logger.debug(f"TableComparison() - Create output table {output_table_str} via the sql statement <{sql}>")
+        self.logger.debug(f"Comparison() - Create output table {output_table_str} via the sql statement <{sql}>")
         duckdb.execute(sql)
         if not comparison_table_has_change_type:
             sql = f"ALTER TABLE {output_table_str} add {CHANGE_TYPE_COLUMN} varchar(1)"
-            self.logger.debug("TableComparison() - Adding the change_type column to the output table <{sql}>")
+            self.logger.debug(f"Comparison() - Adding the change_type column to the output table <{sql}>")
             duckdb.execute(sql)
         output_list = input_fields_str_s.replace('s.', "") + additional_fields_str_t.replace('t.',
                                              "") + f", {CHANGE_TYPE_COLUMN}"
         sql = f"insert into {output_table_str}({output_list}) {select}"
-        self.logger.debug(f"TableComparison() - Executing the SQL statement to identify the delta and "
+        self.logger.debug(f"Comparison() - Executing the SQL statement to identify the delta and "
                           f"split into insert and update records via the sql statement <{sql}>")
-        duckdb.execute(sql, [self.termination_date])
+        if self.end_date_column is not None:
+            duckdb.execute(sql, [self.termination_date])
+        else:
+            duckdb.execute(sql)
         res = duckdb.execute(f"select count(*) from {output_table_str}").fetchall()
         self.last_execution.processed(res[0][0])
-        self.logger.info(f"TableComparison() - {self.last_execution}")
+        self.logger.info(f"Comparison() - {self.last_execution}")
 
 class SCD2(TableSynonym):
 
@@ -211,7 +220,7 @@ class SCD2(TableSynonym):
                  current_flag_set: Union[None, str] = None, current_flag_unset: Union[None, str] = None,
                  logger: Union[None, Logger] = None):
         """
-        The SCD2 transform takes the information created by the TableComparison and turns that into the changes
+        The SCD2 transform takes the information created by the Comparison and turns that into the changes
         required for the target table to contain SCD2 data.
         The task is quite simple:
         - New records get a start date and the end date is the termination date, by default 9999-12-31
@@ -263,10 +272,10 @@ class SCD2(TableSynonym):
         self.current_flag_unset = current_flag_unset
 
     def add_default_columns(self, table: Table):
-        table.add_column(self.start_date_column, "datetime")
-        table.add_column(self.end_date_column, "datetime")
+        table.add_column(pa.field(self.start_date_column, pa.timestamp('ms')))
+        table.add_column(pa.field(self.end_date_column, pa.timestamp('ms')))
         if self.current_flag_column is not None:
-            table.add_column(self.current_flag_column, "varchar(1)")
+            table.add_column(pa.field(self.current_flag_column, pa.string()))
 
     def execute(self, duckdb):
         self.logger.info(f"SCD2() - Started for {self.source.name}")
@@ -274,7 +283,7 @@ class SCD2(TableSynonym):
         source_table = quote_str(self.source.table_name)
         start_date = self.start_date
         if start_date is None:
-            start_date = datetime.now(timezone.utc)
+            start_date = datetime.now()
         end_date = self.end_date
         if end_date is None:
             end_date = start_date
@@ -362,7 +371,7 @@ class GenerateKey(TableSynonym):
         super().__init__(name, cdc_table)
         self.add_input(cdc_table)
         if logger is None:
-            self.logger = logging.getLogger("TableComparison")
+            self.logger = logging.getLogger("Comparison")
         else:
             self.logger = logger
         self.surrogate_key_column = surrogate_key_column
@@ -370,15 +379,15 @@ class GenerateKey(TableSynonym):
 
     def add_default_columns(self, table: Table):
         if self.surrogate_key_column is not None:
-            table.add_column(self.surrogate_key_column, "integer")
-            table.set_logical_pk_list([self.surrogate_key_column])
+            table.add_column(pa.field(self.surrogate_key_column, pa.int32()))
+            table.set_pk_list([self.surrogate_key_column])
 
     def execute(self, duckdb):
         self.logger.info(f"GenerateKey() - Started for {self.name}")
         self.last_execution = OperationalMetadata()
         if self.surrogate_key_column is None:
             if isinstance(self.start_value, Table):
-                pks = get_table_primary_key(duckdb, self.logger, self.start_value.table_name)
+                pks = self.start_value.get_table_primary_key(duckdb)
                 if pks is None:
                     raise RuntimeError(f"The target table {self.start_value.table_name} has no "
                                        f"primary - must specify a surrogate key column then")
@@ -419,16 +428,16 @@ class GenerateKey(TableSynonym):
 
 class CDCOperation(TableSynonym):
 
-    def __init__(self, cdc_table: Table, name: Union[None, str] = None, logical_pk_list: Union[None, Iterable[str]] = None,
+    def __init__(self, cdc_table: Table, name: Union[None, str] = None, pk_list: Union[None, Iterable[str]] = None,
                  map_insert_to: str = None, map_update_to: str = None, map_before_to: str = None, map_delete_to: str = None,
                  column_expressions: Union[None, dict[str, str]] = None, logger: Union[None, Logger] = None):
         """
         Allows to modify the change type flag and to set values based on the before image.
-        For example, TableComparison found out the new and changed records but all records should be inserted into
+        For example, Comparison found out the new and changed records but all records should be inserted into
         the target. Hence, the map_update_to is set to 'I'.
 
         :param cdc_table:
-        :param logical_pk_list:
+        :param pk_list:
         :param map_insert_to:
         :param map_update_to:
         :param map_before_to:
@@ -444,7 +453,7 @@ class CDCOperation(TableSynonym):
         if not cdc_table.is_persisted():
             raise RuntimeError("Input dataset must be a persisted table")
         if logger is None:
-            self.logger = logging.getLogger("TableComparison")
+            self.logger = logging.getLogger("Comparison")
         else:
             self.logger = logger
         self.map_insert_to = map_insert_to
@@ -452,9 +461,9 @@ class CDCOperation(TableSynonym):
         self.map_before_to = map_before_to
         self.map_delete_to = map_delete_to
         self.column_expressions = column_expressions
-        self.logical_pk_list = logical_pk_list
-        if logical_pk_list is None:
-            self.logical_pk_list = cdc_table.logical_pk_list
+        self.logical_pk_list = pk_list
+        if pk_list is None:
+            self.logical_pk_list = cdc_table.pk_list
 
     def execute(self, duckdb):
         self.logger.info(f"CDCOperation() - Started for {self.name}")

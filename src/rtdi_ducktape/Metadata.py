@@ -1,11 +1,12 @@
 import datetime
+import re
 from abc import ABC, abstractmethod
-from collections import OrderedDict
 from datetime import timezone
-from enum import Enum
+from enum import Enum, auto
 from logging import Logger
 from typing import Union, Iterable
-import re
+
+import pyarrow as pa
 
 from .SQLUtils import quote_str, convert_list_to_str
 
@@ -103,12 +104,13 @@ class Step(ABC):
 class Dataset(Step, ABC):
 
     def __init__(self, dataset_name: str, is_cdc: bool = False,
-                 logical_pk_list: Union[None, Iterable[str]] = None):
+                 pk_list: Union[None, Iterable[str]] = None):
         super().__init__(dataset_name)
         self.show_projection = "*"
         self.where_clause = None
-        self.logical_pk_list = logical_pk_list
+        self.pk_list = pk_list
         self.is_cdc = is_cdc
+        self.schema: Union[None, pa.Schema] = None
 
     @abstractmethod
     def is_persisted(self) -> bool:
@@ -117,6 +119,30 @@ class Dataset(Step, ABC):
     @abstractmethod
     def get_sub_select_clause(self) -> str:
         pass
+
+    def create_schema(self, db):
+        sql = f"""
+            with source as {self.get_sub_select_clause()}
+            select * from source;
+        """
+        data = db.sql(sql).arrow()
+        self.schema = data.schema
+
+    def get_schema(self, duckdb):
+        if self.schema is None:
+            self.create_schema(duckdb)
+        return self.schema
+
+    def get_cols(self, db) -> set[str]:
+        if self.schema is None:
+            self.create_schema(db)
+        return set(self.schema.names)
+
+    def add_column(self, field: pa.Field):
+        if self.schema is None:
+            self.schema = pa.schema([field], None)
+        else:
+            self.schema = self.schema.append(field)
 
     def set_show_columns(self, projection: list[str]):
         self.show_projection = convert_list_to_str(projection)
@@ -157,7 +183,6 @@ class Table(Dataset):
                  pk_list: Union[None, Iterable[str]] = None, allow_evolution: bool = False):
         super().__init__(dataset_name, is_cdc, pk_list)
         self.table_name = table_name
-        self.cols: Union[None, OrderedDict[str, str]] = None
 
     def is_persisted(self):
         return True
@@ -165,68 +190,51 @@ class Table(Dataset):
     def get_sub_select_clause(self) -> str:
         return f"(select * from {quote_str(self.table_name)})"
 
-    def add_column(self, column_name: str, column_datatype: str):
-        if self.cols is None:
-            self.cols = OrderedDict()
-        self.cols[column_name] = column_datatype
-
     def add_all_columns(self, source: Dataset, duckdb):
-        if isinstance(source, Table):
-            duckdb.execute(f"SELECT column_name, data_type, is_nullable, numeric_precision, numeric_scale "
-                           f"FROM duckdb_columns() "
-                           f"WHERE table_name = '{source.table_name}' ORDER BY column_index")
-            data = duckdb.fetchall()
-            if len(data) == 0:
-                raise RuntimeError("Table not found in DuckDB")
-            for fields in data:
-                name = fields[0]
-                datatype = fields[1]
-                not_null = ''
-                if fields[2] == 'false':
-                    not_null = 'not null'
-                datatype_suffix = ''
-                if datatype == 'decimal':
-                    datatype_suffix = f"({fields[3]}, {fields[4]})"
-                self.add_column(name, f"{datatype}{datatype_suffix} {not_null}")
+        source_schema = source.get_schema(duckdb)
+        if self.schema is None:
+            fields = [source_schema.field(i) for i in range(0, len(source_schema.names))]
+            self.schema = pa.schema(fields, None)
         else:
-            sql = f"""
-                with source as {source.get_sub_select_clause()}
-                select * from source;
-            """
-            duckdb.execute(sql)
-            metadata = duckdb.description()
-            for fields in metadata:
-                name = fields[0]
-                datatype = fields[1]
-                match datatype:
-                    case 'NUMBER':
-                        datatype = 'decimal(38,7)' # DuckDB does not provide any additional information - it cannot
-                self.add_column(name, f"{datatype}")
+            self.schema = pa.unify_schemas([source_schema])
+
+    def create_schema(self, db):
+        data = db.table(self.table_name).arrow()
+        self.schema = data.schema
+
+    def get_table_primary_key(self, db) -> Union[None, set[str]]:
+        if self.pk_list is None:
+            db.execute(f"SELECT constraint_column_names FROM duckdb_constraints() "
+                       f"WHERE table_name = '{self.table_name}' and constraint_type = 'PRIMARY KEY'")
+            data = db.fetchall()
+            if data is None or len(data) == 0:
+                return None
+            pk_columns = data[0][0]
+            pk_list = set()
+            for field in pk_columns:
+                pk_list.add(field)
+            if len(pk_list) > 0:
+                self.pk_list = pk_list
+        return self.pk_list
 
     def create_table(self, duckdb):
-        if self.cols is None:
+        if self.schema is None:
             raise RuntimeError("Cannot create a table without columns - use add_column to add some")
-        create_str = ""
-        for name, datatype in self.cols.items():
-            if len(create_str) == 0:
-                create_str += f"create table \"{self.table_name}\" ("
-            else:
-                create_str += ", "
-            create_str += f"{quote_str(name)} {datatype}"
-        pk_str = convert_list_to_str(self.logical_pk_list)
-        if pk_str is not None:
-            create_str += f", primary key ({pk_str})"
-        create_str += ")"
-        duckdb.execute(create_str)
+        table = self.schema.empty_table()
+        duckdb.sql(f"DROP TABLE IF EXISTS {quote_str(self.table_name)}")
+        rel = duckdb.from_arrow(table)
+        rel.create(self.table_name)
+        pk_str = convert_list_to_str(self.pk_list)
+        duckdb.execute(f"alter table {quote_str(self.table_name)} add primary key ({pk_str})")
 
-    def set_logical_pk_list(self, logical_pk_list: Union[None, Iterable[str]] = None):
-        self.logical_pk_list = logical_pk_list
+    def set_pk_list(self, pk_list: Union[None, Iterable[str]] = None):
+        self.pk_list = pk_list
 
 
 class TableSynonym(Table):
 
     def __init__(self, name: str, table: Table):
-        super().__init__(name, table.table_name, table.is_cdc, table.logical_pk_list)
+        super().__init__(name, table.table_name, table.is_cdc, table.pk_list)
         self.synonym_for = table
 
     def create_table(self, duckdb):
@@ -238,7 +246,7 @@ class TableSynonym(Table):
     def get_sub_select_clause(self) -> str:
         return self.synonym_for.get_sub_select_clause()
 
-    def add_column(self, column_name: str, column_datatype: str):
+    def add_column(self, field: pa.Field):
         raise RuntimeError(f"This is a synonym for {self.synonym_for.table_name}")
 
     def add_all_columns(self, source: Dataset, duckdb):
@@ -250,15 +258,20 @@ class TableSynonym(Table):
     def get_show_data(self, duckdb):
         self.synonym_for.get_show_data(duckdb)
 
-    def set_logical_pk_list(self, logical_pk_list: Union[None, Iterable[str]] = None):
-        self.synonym_for.set_logical_pk_list(logical_pk_list)
+    def set_pk_list(self, pk_list: Union[None, Iterable[str]] = None):
+        self.synonym_for.set_pk_list(pk_list)
 
+    def get_cols(self, duckdb) -> set[str]:
+        return self.synonym_for.get_cols(duckdb)
+
+    def get_table_primary_key(self, duckdb) -> Union[None, set[str]]:
+        return self.synonym_for.get_table_primary_key(duckdb)
 
 class Query(Dataset):
 
     def __init__(self, dataset_name: str, sql: str, inputs: Union[None, list[Dataset]] = None, is_cdc: bool = False,
-                 logical_pk_list: Union[None, Iterable[str]] = None):
-        super().__init__(dataset_name, is_cdc, logical_pk_list)
+                 pk_list: Union[None, Iterable[str]] = None):
+        super().__init__(dataset_name, is_cdc, pk_list)
         self.sql = sql
         if inputs is not None:
             for i in inputs:
