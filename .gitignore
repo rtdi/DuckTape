@@ -6,6 +6,7 @@ __pycache__/
 .idea/
 .vscode/
 
+test/tmp/
 # C extensions
 *.so
 

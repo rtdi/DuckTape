@@ -10,11 +10,12 @@ def quote_str(name: str) -> Union[None, str]:
         return '"' + name + '"'
 
 
-def convert_list_to_str(values: Iterable[str], qualifier: str = None) -> Union[None, str]:
+def convert_list_to_str(values: Iterable[str], qualifier: Union[None, str] = None, aliases: Union[None, dict[str, str]] = None) -> Union[None, str]:
     """
-    Turns the list of strings into a comma separated single string, optionally with qualifier
+    Turns the list of strings into a comma separated single string, optionally with qualifier and alias
     :param values:
     :param qualifier:
+    :param aliases:
     :return:
     """
     output_str = ""
@@ -22,13 +23,36 @@ def convert_list_to_str(values: Iterable[str], qualifier: str = None) -> Union[N
         for field in values:
             if len(output_str) > 0:
                 output_str += ", "
+            alias = ""
+            if aliases is not None:
+                a = aliases.get(field)
+                if a is not None:
+                    alias = " as " + quote_str(a)
             if qualifier is not None:
-                output_str += f"{qualifier}.{quote_str(field)}"
+                output_str += f"{qualifier}.{quote_str(field)}{alias}"
             else:
-                output_str += quote_str(field)
+                output_str += quote_str(field) + alias
         return output_str
     else:
         return None
+
+def convert_to_order_clause(order_columns: dict[str, bool], qualifier: Union[None, str] = None) -> Union[None, str]:
+    """
+    Turns the list of strings into a comma separated single string with asc/desc info
+    :return:
+    """
+    output_str = ""
+    for field, asc in order_columns.items():
+        if len(output_str) > 0:
+            output_str += ", "
+        desc = ""
+        if not asc:
+            desc = " desc"
+        if qualifier is not None:
+            output_str += f"{qualifier}.{quote_str(field)}{desc}"
+        else:
+            output_str += quote_str(field) + desc
+    return output_str
 
 
 def empty(iterable: Iterable[any]):

@@ -1,4 +1,5 @@
 import logging
+import shutil
 import unittest
 
 import duckdb
@@ -12,7 +13,7 @@ logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
 logger = logging.getLogger("rtdi_ducktape")
 
 
-class DuckDBTests(unittest.TestCase):
+class DeltalakeTests(unittest.TestCase):
 
     def test_cdc(self):
         """
@@ -22,15 +23,14 @@ class DuckDBTests(unittest.TestCase):
         duckdb.execute("create or replace table csv_data as (SELECT * FROM 'testdata/customers-100000.csv')")
         duckdb.execute("alter table csv_data add primary key (\"Customer Id\")")
         df = Dataflow()
-        source_table = df.add(Table('csv_data', 'csv_data'))
+        source_table = df.add(Table('csv_data', 'csv_data', pk_list=["Customer Id"]))
         tc = df.add(Comparison(source_table, detect_deletes=True, logger=logger))
-        duckdb.execute("create or replace table csv_data_copy as (SELECT * FROM csv_data) with no data")
-        duckdb.execute("alter table csv_data_copy add primary key (\"Customer Id\")")
         target_table = df.add(DeltaLakeTable("./tmp/deltalake", tc, "csv_data_copy", logger=logger))
-        target_table.add_all_columns(source_table)
+        shutil.rmtree('./tmp/deltalake', ignore_errors=True)
+        target_table.add_all_columns(source_table, duckdb)
         target_table.create_table(duckdb)
 
-        comparison_table = Query('deltalake_table', "SELECT * FROM delta_scan('file://./tmp/deltalake')")
+        comparison_table = Query('deltalake_table', "SELECT * FROM delta_scan('tmp/deltalake/csv_data_copy')")
         tc.set_comparison_table(comparison_table)
 
         tc.set_show_columns(
@@ -38,16 +38,24 @@ class DuckDBTests(unittest.TestCase):
         tc.set_show_where_clause(
             "\"Customer Id\" in ('FaE5E3c1Ea0dAf6', '56b3cEA1E6A49F1', 'eF43a70995dabAB')")
 
+        target_table.set_show_columns(
+            ['"Customer Id"', '"First Name"'])
+        target_table.set_show_where_clause(
+            "\"Customer Id\" in ('FaE5E3c1Ea0dAf6', '56b3cEA1E6A49F1', 'eF43a70995dabAB')")
+
+        target_table.show(duckdb, logger, "Target table before start")
         df.start(duckdb)
         tc.show(duckdb, logger, "CDC table after execution")
+        target_table.show(duckdb, logger, "Target table")
 
         duckdb.execute("create or replace table csv_data as (SELECT * FROM 'testdata/customers-100000_change_01.csv')")
         df.start(duckdb)
         tc.show(duckdb, logger, "CDC table after execution")
+        target_table.show(duckdb, logger, "Target table")
 
         actual = set(target_table.get_show_data(duckdb))
-        expected = {('eF43a70995dabAB', 'Terrance'), ('56b3cEA1E6A49F1', 'Barry')}
-        self.assertEqual(actual, expected, "Datasets are different")
+        expected = {('56b3cEA1E6A49F1', 'Berry'), ('FaE5E3c1Ea0dAf6', 'Fritz')}
+        self.assertEqual(expected, actual, "Datasets are different")
 
 
 if __name__ == '__main__':

@@ -1,14 +1,16 @@
 import logging
+from abc import ABC, abstractmethod
 from logging import Logger
 from typing import Union, Iterable
 
-from .CDCTransforms import CHANGE_TYPE
-from .Metadata import Dataset, Table, OperationalMetadata, create_join_condition
-from .SQLUtils import convert_list_to_str, quote_str
 import pyarrow as pa
 
+from .CDCTransforms import CHANGE_TYPE
+from .Metadata import Dataset, OperationalMetadata, create_join_condition, Step, Table
+from .SQLUtils import convert_list_to_str, quote_str
 
-class Loader(Table):
+
+class Loader(Step, ABC):
 
     def __init__(self, source: Dataset, table_name: str, name: Union[None, str] = None,
                  pk_list: Union[None, Iterable[str]] = None, allow_evolution: bool = False,
@@ -34,7 +36,14 @@ class Loader(Table):
         """
         if name is None:
             name = f"Target table {table_name}"
-        super().__init__(name, table_name, is_cdc=is_cdc, pk_list=pk_list, allow_evolution=allow_evolution)
+        super().__init__(name)
+        self.table_name = table_name
+        self.pk_list = pk_list
+        self.allow_evolution=allow_evolution
+        self.show_projection = "*"
+        self.where_clause = None
+        self.is_cdc = is_cdc
+        self.schema: Union[None, pa.Schema] = None
         self.add_input(source)
         self.source = source
         self.generated_key_column = generated_key_column
@@ -44,6 +53,37 @@ class Loader(Table):
         else:
             self.logger = logger
 
+    def set_pk_list(self, pk_list: Union[None, Iterable[str]] = None):
+        self.pk_list = pk_list
+
+    @abstractmethod
+    def get_schema(self, duckdb):
+        pass
+
+    @abstractmethod
+    def get_cols(self, db) -> set[str]:
+        pass
+
+    def add_column(self, field: pa.Field):
+        if self.schema is None:
+            self.schema = pa.schema([field], None)
+        else:
+            self.schema = self.schema.append(field)
+
+    def set_show_columns(self, projection: list[str]):
+        self.show_projection = convert_list_to_str(projection)
+
+    def set_show_where_clause(self, clause):
+        self.where_clause = clause
+
+    @abstractmethod
+    def show(self, duckdb, logger: Logger, heading: Union[None, str] = None):
+        pass
+
+    @abstractmethod
+    def get_show_data(self, duckdb):
+        pass
+
     def add_default_columns(self):
         if self.generated_key_column is not None:
             self.add_column(pa.field(self.generated_key_column, pa.int32(), True))
@@ -51,8 +91,15 @@ class Loader(Table):
         if self.is_cdc:
             self.add_column(pa.field(CHANGE_TYPE, pa.string()))
 
+    @abstractmethod
+    def get_table_primary_key(self, db) -> Union[None, set[str]]:
+        pass
 
-class DuckDBTable(Loader):
+    @abstractmethod
+    def create_table(self, duckdb):
+        pass
+
+class DuckDBTable(Table):
 
     def __init__(self, source: Dataset, table_name: str, name: Union[None, str] = None,
                  pk_list: Union[None, Iterable[str]] = None, allow_evolution: bool = False,
@@ -68,8 +115,16 @@ class DuckDBTable(Loader):
         :param pk_list: optional pk list in case the target does not support PKs
         :param logger: logger
         """
-        super().__init__(source, table_name, name, pk_list, allow_evolution,
-                         is_cdc, generated_key_column, start_value, logger)
+        super().__init__(name, table_name, is_cdc, pk_list)
+        self.add_input(source)
+        self.start_value = start_value
+        self.allow_evolution = allow_evolution
+        self.generated_key_column = generated_key_column
+        if logger is None:
+            self.logger = logging.getLogger("DuckDBLoader")
+        else:
+            self.logger = logger
+        self.source = source
 
     def get_generated_key_start(self, duckdb):
         if self.start_value is not None:
@@ -86,6 +141,10 @@ class DuckDBTable(Loader):
             else:
                 start_value += 1
             return start_value
+
+    def add_default_columns(self):
+        if self.generated_key_column is not None:
+            self.add_column(pa.field(self.generated_key_column, pa.int32()))
 
     def execute(self, duckdb):
         self.last_execution = OperationalMetadata()

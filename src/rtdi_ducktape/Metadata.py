@@ -2,7 +2,7 @@ import datetime
 import re
 from abc import ABC, abstractmethod
 from datetime import timezone
-from enum import Enum, auto
+from enum import Enum
 from logging import Logger
 from typing import Union, Iterable
 
@@ -44,6 +44,8 @@ class Step(ABC):
         self.executed: bool = False
         self.execute_lock: bool = False
         self.last_execution: Union[None, OperationalMetadata] = None
+        self.schema: Union[None, pa.Schema] = None
+
 
     def add_input(self, step: "Step"):
         if self.inputs is None:
@@ -97,6 +99,28 @@ class Step(ABC):
     def execute(self, duckdb):
         pass
 
+    def add_column(self, field: pa.Field):
+        if self.schema is None:
+            self.schema = pa.schema([field], None)
+        else:
+            self.schema = self.schema.append(field)
+
+    @abstractmethod
+    def get_schema(self, duckdb):
+        pass
+
+    def add_all_columns(self, source: "Dataset", duckdb):
+        source_schema = source.get_schema(duckdb)
+        if self.schema is None:
+            fields = [source_schema.field(i) for i in range(0, len(source_schema.names))]
+            self.schema = pa.schema(fields, None)
+        else:
+            self.schema = pa.unify_schemas([source_schema])
+
+    @abstractmethod
+    def get_cols(self, db) -> set[str]:
+        pass
+
     def __str__(self):
         return self.name
 
@@ -110,7 +134,6 @@ class Dataset(Step, ABC):
         self.where_clause = None
         self.pk_list = pk_list
         self.is_cdc = is_cdc
-        self.schema: Union[None, pa.Schema] = None
 
     @abstractmethod
     def is_persisted(self) -> bool:
@@ -137,12 +160,6 @@ class Dataset(Step, ABC):
         if self.schema is None:
             self.create_schema(db)
         return set(self.schema.names)
-
-    def add_column(self, field: pa.Field):
-        if self.schema is None:
-            self.schema = pa.schema([field], None)
-        else:
-            self.schema = self.schema.append(field)
 
     def set_show_columns(self, projection: list[str]):
         self.show_projection = convert_list_to_str(projection)
@@ -180,7 +197,7 @@ class Dataset(Step, ABC):
 class Table(Dataset):
 
     def __init__(self, dataset_name: str, table_name: str, is_cdc: bool = False,
-                 pk_list: Union[None, Iterable[str]] = None, allow_evolution: bool = False):
+                 pk_list: Union[None, Iterable[str]] = None):
         super().__init__(dataset_name, is_cdc, pk_list)
         self.table_name = table_name
 
@@ -189,14 +206,6 @@ class Table(Dataset):
 
     def get_sub_select_clause(self) -> str:
         return f"(select * from {quote_str(self.table_name)})"
-
-    def add_all_columns(self, source: Dataset, duckdb):
-        source_schema = source.get_schema(duckdb)
-        if self.schema is None:
-            fields = [source_schema.field(i) for i in range(0, len(source_schema.names))]
-            self.schema = pa.schema(fields, None)
-        else:
-            self.schema = pa.unify_schemas([source_schema])
 
     def create_schema(self, db):
         data = db.table(self.table_name).arrow()
@@ -224,8 +233,9 @@ class Table(Dataset):
         duckdb.sql(f"DROP TABLE IF EXISTS {quote_str(self.table_name)}")
         rel = duckdb.from_arrow(table)
         rel.create(self.table_name)
-        pk_str = convert_list_to_str(self.pk_list)
-        duckdb.execute(f"alter table {quote_str(self.table_name)} add primary key ({pk_str})")
+        if self.pk_list is not None:
+            pk_str = convert_list_to_str(self.pk_list)
+            duckdb.execute(f"alter table {quote_str(self.table_name)} add primary key ({pk_str})")
 
     def set_pk_list(self, pk_list: Union[None, Iterable[str]] = None):
         self.pk_list = pk_list

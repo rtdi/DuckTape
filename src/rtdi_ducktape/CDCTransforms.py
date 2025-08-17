@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from logging import Logger
 from typing import Union, Iterable
 
@@ -96,7 +96,7 @@ class Comparison(Table):
         self.comparison = comparison
 
     def execute(self, duckdb):
-        self.logger.info(f"Comparison() - Started for {self.source.name}")
+        self.logger.info(f"Comparison() - Started for {self.name}")
         if self.pk_list is None:
             if isinstance(self.comparison, Table):
                 self.logger.debug(f"Comparison() - No logical primary key provided, reading the pk of "
