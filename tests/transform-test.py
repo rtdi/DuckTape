@@ -160,34 +160,30 @@ class DuckDBTests(unittest.TestCase):
         target_table = df.add(DuckDBTable(tc, "customer_output", logger=logger))
         tc.set_comparison_table(target_table)
 
-        tc.set_show_columns(
-            ['"Customer Id"', '"First Name"', "__change_type"])
-        tc.set_show_where_clause(
-            "\"Customer Id\" in ('FaE5E3c1Ea0dAf6', '56b3cEA1E6A49F1', 'eF43a70995dabAB')")
+        tc.set_show_columns(['"Customer Id"', '"First Name"', "__change_type"])
+        tc.set_show_where_clause("\"Customer Id\" in ('FaE5E3c1Ea0dAf6', '56b3cEA1E6A49F1', 'eF43a70995dabAB')")
 
-        target_table.set_show_columns(
-            ['"Customer Id"', '"First Name"', "__change_type"])
-        target_table.set_show_where_clause(
-            "\"Customer Id\" in ('FaE5E3c1Ea0dAf6', '56b3cEA1E6A49F1', 'eF43a70995dabAB')")
+        target_table.set_show_columns(['"Customer Id"', '"First Name"', "__change_type", "change_date"])
+        target_table.set_show_where_clause("\"Customer Id\" in ('FaE5E3c1Ea0dAf6', '56b3cEA1E6A49F1', "
+                                           "'eF43a70995dabAB')")
 
         df.start(duckdb)
         tc.show(duckdb, logger, "CDC table after execution")
         target_table.show(duckdb, logger, "Target table after apply")
-        tc.completed()
 
         duckdb.execute("create or replace table csv_data as (SELECT *, '?' as __change_type, "
                        "current_localtimestamp() as change_date FROM 'testdata/customers-100000_change_01.csv')")
         df.start(duckdb)
         tc.show(duckdb, logger, "CDC table after execution")
         target_table.show(duckdb, logger, "Target table after apply")
-        tc.completed()
 
         duckdb.execute("create or replace table csv_data as (SELECT *, '?' as __change_type, "
                        "current_localtimestamp() as change_date FROM 'testdata/customers-100000.csv')")
         df.start(duckdb)
         tc.show(duckdb, logger, "CDC table after execution")
         target_table.show(duckdb, logger, "Target table after apply")
-        tc.completed()
+
+        target_table.set_show_columns(['"Customer Id"', '"First Name"', "__change_type"])
 
         actual = set(target_table.get_show_data(duckdb))
         # ├─────────────────┼────────────┼───────────────┤

@@ -25,7 +25,7 @@ class DeltalakeTests(unittest.TestCase):
         df = Dataflow()
         source_table = df.add(Table('csv_data', 'csv_data', pk_list=["Customer Id"]))
         tc = df.add(Comparison(source_table, detect_deletes=True, logger=logger))
-        target_table = df.add(DeltaLakeTable("./tmp/deltalake", tc, "csv_data_copy", logger=logger))
+        target_table = df.add(DeltaLakeTable("tmp/deltalake", tc, "csv_data_copy", logger=logger))
         shutil.rmtree('./tmp/deltalake', ignore_errors=True)
         target_table.add_all_columns(source_table, duckdb)
         target_table.create_table(duckdb)

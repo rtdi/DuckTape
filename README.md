@@ -63,10 +63,164 @@ Thanks to DuckDB we have all options:
  - Do not create a source table but a query selecting directly from a supported source. That can be a CSV file, a Parquet file, a SQL Server table, a Delta Lake table,... 
  - Similar in the DuckDBLoader.
 
+## Examples
+
+### Upsert
+
+Read a source CSV file and upsert it into a target table based on the target table's primary key
+
+```
+duckdb.execute("create or replace table csv_data as (SELECT * FROM 'testdata/customers-100000.csv')")
+duckdb.execute("alter table csv_data add primary key (\"Customer Id\")")
+duckdb.execute("create or replace table csv_data_copy as (SELECT * FROM csv_data)")
+duckdb.execute("alter table csv_data_copy add primary key (\"Customer Id\")")
+df = Dataflow()
+source_table = df.add(Table('csv_data', 'csv_data'))
+target_table = df.add(DuckDBTable(source_table, "csv_data_copy", logger=logger))
+df.start(duckdb)
+```
+
+### Slow Changing Dimension Table Type 2
+
+Create a target table with all columns of the source plus
+ - a generated key column
+ - a start/end date
+ - a current indicator
+
+Goal is to have all the different versions, each with a validity period.
+
+A tricky situation is when a source record got deleted - it is no longer valid, hence go an end-date, and later it is added again - with a new start date hence.
+
+```
+termination_date = datetime.strptime('9999-12-31', '%Y-%m-%d')
+
+duckdb.execute("create or replace table csv_data as (SELECT * FROM 'testdata/customers-100000.csv')")
+df = Dataflow()
+source_table = df.add(Table('csv_data', 'csv_data', pk_list=['Customer Id']))
+tc = df.add(Comparison(source_table, end_date_column="end_date",
+                       termination_date=termination_date,
+                       detect_deletes=True, order_column="version_id", logger=logger))
+scd2 = df.add(SCD2(tc, 'start_date', 'end_date',
+            termination_date=termination_date,
+            current_flag_column='current', current_flag_set='Y', current_flag_unset='N', logger=logger))
+target_table = df.add(DuckDBTable(scd2, "customer_output", generated_key_column='version_id',
+                                  pk_list=['version_id'], logger=logger))
+
+# create the target table with all needed columns
+target_table.add_all_columns(source_table, duckdb)
+scd2.add_default_columns(target_table)
+target_table.add_default_columns()
+target_table.create_table(duckdb)
+
+tc.set_comparison_table(target_table)
+df.start(duckdb)
+```
+
+On 2025-05-28 two records got added. They were marked as current and valid until 9999-12-31.
+On 2025-07-06 Fritz was added as new customer, Terrance deleted and Barry changed name to Berry. Therefore, Fritz had a valid from date of 2025-07-06 to 9999-12-31 on this day, Terrance' end date was updated and a new version for Barry/Berry was created, marking the old version as outdated.
+On 2025-08-09 the Customer Id of Terrance was added again. So we have the old version valid from 2025-05-28 to 2025-07-06 and a new version valid since 2025-08-09. The name of Berry/Barry got corrected again.
+
+```
+┌─────────────────┬────────────┬─────────────────────┬─────────────────────┬─────────┐
+│   Customer Id   │ First Name │     start_date      │     end_date        │ current │
+│     varchar     │  varchar   │     timestamp       │     timestamp       │ varchar │
+├─────────────────┼────────────┼─────────────────────┼─────────────────────┼─────────┤
+│ 56b3cEA1E6A49F1 │ Barry      │ 2025-05-28 00:00:00 │ 2025-07-06 00:00:00 │ N       │
+│ eF43a70995dabAB │ Terrance   │ 2025-05-28 00:00:00 │ 2025-07-06 00:00:00 │ N       │
+│ FaE5E3c1Ea0dAf6 │ Fritz      │ 2025-07-06 00:00:00 │ 2025-08-09 00:00:00 │ N       │
+│ 56b3cEA1E6A49F1 │ Berry      │ 2025-07-06 00:00:00 │ 2025-08-09 00:00:00 │ N       │
+│ eF43a70995dabAB │ Terrance   │ 2025-08-09 00:00:00 │ 9999-12-31 00:00:00 │ Y       │
+│ 56b3cEA1E6A49F1 │ Barry      │ 2025-08-09 00:00:00 │ 9999-12-31 00:00:00 │ Y       │
+└─────────────────┴────────────┴─────────────────────┴─────────────────────┴─────────┘
+```
+
+### History table
+
+Read a source CSV file, compare it with the latest version in the target and append the differences.
+
+```
+duckdb.execute("create or replace table csv_data as (SELECT *, '?' as __change_type, "
+               "current_localtimestamp() as change_date FROM 'testdata/customers-100000.csv')")
+df = Dataflow()
+source_table = df.add(Table('csv_data', 'csv_data'))
+tc = df.add(Comparison(source_table, detect_deletes=True, logical_pk_list=['Customer Id'],
+                       columns_to_ignore=['change_date'], order_column='change_date', logger=logger))
+duckdb.execute("create or replace table customer_output as (SELECT * FROM csv_data) with no data")
+
+target_table = df.add(DuckDBTable(tc, "customer_output", logger=logger))
+tc.set_comparison_table(target_table)
+df.start(duckdb)
+```
+
+After a couple of changes and executions, the target table contains the complete history of changed records.
+
+```
+┌─────────────────┬────────────┬───────────────┬─────────────────────────┐
+│   Customer Id   │ First Name │ __change_type │       change_date       │
+│     varchar     │  varchar   │    varchar    │        timestamp        │
+├─────────────────┼────────────┼───────────────┼─────────────────────────┤
+│ 56b3cEA1E6A49F1 │ Barry      │ I             │ 2025-08-17 06:07:32.213 │
+│ eF43a70995dabAB │ Terrance   │ I             │ 2025-08-17 06:07:32.213 │
+│ FaE5E3c1Ea0dAf6 │ Fritz      │ I             │ 2025-08-17 13:45:32.521 │
+│ 56b3cEA1E6A49F1 │ Berry      │ U             │ 2025-08-17 13:45:32.521 │
+│ 56b3cEA1E6A49F1 │ Barry      │ B             │ 2025-08-17 17:24:29.193 │
+│ eF43a70995dabAB │ Terrance   │ D             │ 2025-08-17 17:24:29.193 │
+└─────────────────┴────────────┴───────────────┴─────────────────────────┘
+```
+
+### Lookup
+
+For cases where a source should be augmented with more data but the lookup table has multiple records matching the join condition, writing the proper SQL is difficult. The Lookup transform takes care of that.
+
+In this example, the sales order table should get joined with the customer_history table. Trouble is, the fact only knows the customer_id and the customer_history table has many records.
+We want to know the primary key - the version_id - of the history table for the customer_id that was valid at the order date.
+Meaning, find all versions with a change_date less or equal the order_date, then sort these by change_date descending (`{"change_date": True}`) and pick the first found.
+Yes, a tricky SQL join...
+
+```
+lookup = df.add(Lookup(sales_orders, customer_history,
+                       {"version_id": "current_version_id"},
+                       's.sold_to_customer_id = l."Customer Id" and s.order_date >= l.change_date",
+                       {"change_date": True}
+                       ))
+```
+
+### Query
+
+And of course any valid SQL select can also be used at any place in the dataflow.
+
+```
+query_1 = df.add(Query("Query_1", "select * from delta_scan('tmp/deltalake/csv_data_copy')))
+```
+
+### Deltalake write
+
+Writing the data into a DuckDB target table and then copying the contents into the target is one option. Common targets should be supported by the library.
+
+DuckDB can and must be used to read the Deltalake table, here it is used as input to the Comparison transform, but writing it cannot. The DeltaLakeTable class can.
+
+```
+duckdb.execute("create or replace table csv_data as (SELECT * FROM 'testdata/customers-100000.csv')")
+duckdb.execute("alter table csv_data add primary key (\"Customer Id\")")
+df = Dataflow()
+source_table = df.add(Table('csv_data', 'csv_data', pk_list=["Customer Id"]))
+tc = df.add(Comparison(source_table, detect_deletes=True, logger=logger))
+target_table = df.add(DeltaLakeTable("tmp/deltalake", tc, "csv_data_copy", logger=logger))
+
+# Create the table in deltalake
+target_table.add_all_columns(source_table, duckdb)
+target_table.create_table(duckdb)
+
+comparison_table = Query('deltalake_table', "SELECT * FROM delta_scan('tmp/deltalake/csv_data_copy')")
+tc.set_comparison_table(comparison_table)
+
+df.start(duckdb)
+```
+
 ## Transforms
  - Comparison: Take an input dataset (normal or CDC), compare with the target and create a delta dataset. This tells which records must be inserted, updated, optionally deleted and does remove all records that have not been changed.
- - SCD2: Take a CDC input and provide the changes to be applied in the target, e.g. Change the current version to an end-date of today and create create a new version with start-date today.
- - Pivot/Unpivot: Turn a dataset with multiple columns into a dataset with multiple rows and vice versa, including multiple sets. Example: Source has 12 columns for REVENUE_JAN, REVENUE_FEB,... and 12 columns for QTY_JAN, QTY_FEB,... Result should be 12 rows for each input row.
+ - SCD2: Take a CDC input and provide the changes to be applied in the target, e.g. Change the current version to an end-date of today and create a new version with start-date today.
+ - Pivot/Unpivot: Supported by DuckDB natively. Turn a dataset with multiple columns into a dataset with multiple rows and vice versa, including multiple sets. Example: Source has 12 columns for REVENUE_JAN, REVENUE_FEB,... and 12 columns for QTY_JAN, QTY_FEB,... Result should be 12 rows for each input row.
  - Hierarchy handling: Multiple transforms to deal with parent_child hierarchy tables, hierarchy column (City, region, country) and convert between these representations. Also validate hierarchies to ensure there are no loops in a parent child based hierarchy.
  - Temporal Join: Two datasets must be joined and each as a valid-from/valid-to date. Create a list of dates when something changed and join the data from both tables.
  - CDC: A transform capable of changing the CDC information and do calculations on the change data. Example: If the ACCOUNT_BALANCE changed from 100USD to 500USD, what is the increase? The after image value minus the before image value.

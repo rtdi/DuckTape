@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rtdi_ducktape"
-version = "0.1.1"
+version = "0.8.3"
 authors = [
   { name="Werner Dähn", email="werner.daehn@rtdi.io" },
 ]
@@ -17,7 +17,11 @@ classifiers = [
 ]
 license = "Apache-2.0"
 license-files = ["LICEN[CS]E*"]
-
+dependencies = [
+    "duckdb",
+    "deltalake",
+    "pyarrow"
+]
 [project.urls]
 Homepage = "https://github.com/rtdi/ducktape"
 Issues = "https://github.com/rtdi/ducktape/issues"
