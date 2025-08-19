@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rtdi_ducktape"
-version = "0.8.3"
+version = "0.8.4"
 authors = [
   { name="Werner Dähn", email="werner.daehn@rtdi.io" },
 ]
