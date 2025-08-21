@@ -40,7 +40,8 @@ Because the target table has a primary key and the source is not a CDC table but
         duckdb.execute("create or replace table csv_data as "
                        "(SELECT * FROM 'testdata/customers-100000.csv')")
         duckdb.execute("alter table csv_data add primary key (\"Customer Id\")")
-        duckdb.execute("create or replace table csv_data_copy as (SELECT * FROM csv_data) with no data")
+        duckdb.execute("create or replace table csv_data_copy as "
+                       "(SELECT * FROM csv_data) with no data")
         duckdb.execute("alter table csv_data_copy add primary key (\"Customer Id\")")
 
         df = Dataflow()
@@ -71,7 +72,8 @@ Thanks to DuckDB we have all options:
 Read a source CSV file and upsert it into a target table based on the target table's primary key
 
 ```
-duckdb.execute("create or replace table csv_data as (SELECT * FROM 'testdata/customers-100000.csv')")
+duckdb.execute("create or replace table csv_data as "
+               "(SELECT * FROM 'testdata/customers-100000.csv')")
 duckdb.execute("alter table csv_data add primary key (\"Customer Id\")")
 duckdb.execute("create or replace table csv_data_copy as (SELECT * FROM csv_data)")
 duckdb.execute("alter table csv_data_copy add primary key (\"Customer Id\")")

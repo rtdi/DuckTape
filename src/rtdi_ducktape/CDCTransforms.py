@@ -1,24 +1,21 @@
-import logging
 from datetime import datetime
-from logging import Logger
 from typing import Union, Iterable
 
 import pyarrow as pa
 
+from .Dataflow import logger
 from .Metadata import Dataset, OperationalMetadata, Table, RowType, create_join_condition, TableSynonym
 from .SQLUtils import quote_str, convert_list_to_str, empty, get_first, get_count
 
 CHANGE_TYPE = "__change_type"
 CHANGE_TYPE_COLUMN = '"__change_type"'
 
-
 class Comparison(Table):
 
     def __init__(self, source: Dataset, name: Union[None, str] = None,
                  logical_pk_list: Union[None, Iterable[str]] = None, columns_to_ignore: Union[None, list[str]] = None,
                  order_column: Union[None, str] = None, before_image: bool = True, detect_deletes: bool = False,
-                 end_date_column: Union[None, str] = None, termination_date: Union[None, datetime] = None,
-                 logger: Union[None, Logger] = None
+                 end_date_column: Union[None, str] = None, termination_date: Union[None, datetime] = None
                  ):
         """
         Compare the input with another table, that has at least the same columns as the input and generate the CDC
@@ -58,17 +55,12 @@ class Comparison(Table):
         these are deleted ones
         :param end_date_column: The end date column of the SCD2
         :param termination_date: The value of the end date column in case it is active
-        :param logger: Logger of the dataflow
         """
-        if logger is None:
-            self.logger = logging.getLogger("Comparison")
-        else:
-            self.logger = logger
         if empty(logical_pk_list):
             logical_pk_list = None
         if logical_pk_list is None and source.pk_list is not None:
             logical_pk_list = source.pk_list
-            self.logger.debug(f"Comparison() - No logical primary key provided, using the pk of "
+            logger.debug(f"Comparison() - No logical primary key provided, using the pk of "
                               f"the input {source}: {source.pk_list}")
         if name is None:
             name = f"Comparison for table {source.name}_tc"
@@ -96,23 +88,23 @@ class Comparison(Table):
         self.comparison = comparison
 
     def execute(self, duckdb):
-        self.logger.info(f"Comparison() - Started for {self.name}")
+        logger.info(f"Comparison() - Started for {self.name}")
         if self.pk_list is None:
             if isinstance(self.comparison, Table):
-                self.logger.debug(f"Comparison() - No logical primary key provided, reading the pk of "
+                logger.debug(f"Comparison() - No logical primary key provided, reading the pk of "
                                   f"the comparison table {self.comparison}...")
                 self.pk_list = self.comparison.get_table_primary_key(duckdb)
 
                 if self.pk_list is not None:
-                    self.logger.debug(f"Comparison() - Comparison table {self.comparison} has the "
+                    logger.debug(f"Comparison() - Comparison table {self.comparison} has the "
                                       f"primary key columns {self.pk_list}")
             elif isinstance(self.source, Table):
-                self.logger.debug(f"Comparison() - No logical primary key provided, reading the pk of "
+                logger.debug(f"Comparison() - No logical primary key provided, reading the pk of "
                                   f"the source table {self.source}...")
                 self.pk_list = self.source.get_table_primary_key(duckdb)
 
                 if self.pk_list is not None:
-                    self.logger.debug(f"Comparison() - source table {self.source} has the "
+                    logger.debug(f"Comparison() - source table {self.source} has the "
                                       f"primary key columns {self.pk_list}")
         if self.pk_list is None:
             raise RuntimeError("No logical PK can be derived from the source or the comparison table, hence the "
@@ -191,16 +183,16 @@ class Comparison(Table):
             """
         output_table_str = quote_str(self.table_name)
         sql = f"CREATE OR REPLACE TABLE {output_table_str} AS FROM {self.comparison.get_sub_select_clause()} with no data"
-        self.logger.debug(f"Comparison() - Create output table {output_table_str} via the sql statement <{sql}>")
+        logger.debug(f"Comparison() - Create output table {output_table_str} via the sql statement <{sql}>")
         duckdb.execute(sql)
         if not comparison_table_has_change_type:
             sql = f"ALTER TABLE {output_table_str} add {CHANGE_TYPE_COLUMN} varchar(1)"
-            self.logger.debug(f"Comparison() - Adding the change_type column to the output table <{sql}>")
+            logger.debug(f"Comparison() - Adding the change_type column to the output table <{sql}>")
             duckdb.execute(sql)
         output_list = input_fields_str_s.replace('s.', "") + additional_fields_str_t.replace('t.',
                                              "") + f", {CHANGE_TYPE_COLUMN}"
         sql = f"insert into {output_table_str}({output_list}) {select}"
-        self.logger.debug(f"Comparison() - Executing the SQL statement to identify the delta and "
+        logger.debug(f"Comparison() - Executing the SQL statement to identify the delta and "
                           f"split into insert and update records via the sql statement <{sql}>")
         if self.end_date_column is not None:
             duckdb.execute(sql, [self.termination_date])
@@ -208,7 +200,7 @@ class Comparison(Table):
             duckdb.execute(sql)
         res = duckdb.execute(f"select count(*) from {output_table_str}").fetchall()
         self.last_execution.processed(res[0][0])
-        self.logger.info(f"Comparison() - {self.last_execution}")
+        logger.info(f"Comparison() - {self.last_execution}")
 
 class SCD2(TableSynonym):
 
@@ -217,8 +209,8 @@ class SCD2(TableSynonym):
                  start_date: Union[None, datetime] = None, end_date: Union[None, datetime] = None,
                  termination_date: Union[None, datetime] = None,
                  current_flag_column: Union[None, str] = None,
-                 current_flag_set: Union[None, str] = None, current_flag_unset: Union[None, str] = None,
-                 logger: Union[None, Logger] = None):
+                 current_flag_set: Union[None, str] = None, current_flag_unset: Union[None, str] = None
+                 ):
         """
         The SCD2 transform takes the information created by the Comparison and turns that into the changes
         required for the target table to contain SCD2 data.
@@ -241,16 +233,11 @@ class SCD2(TableSynonym):
         :param current_flag_column: optional column for the current flag indicator
         :param current_flag_set: if the row is the active version, the current flag column should be set to this value - default 'Y'
         :param current_flag_unset: the value for all versions not active - default 'N'
-        :param logger: Logger of the dataflow
         """
         if name is None:
             name = f"SCD2 for table {source.table_name}"
         super().__init__(name, source)
         self.add_input(source)
-        if logger is None:
-            self.logger = logging.getLogger("SCD2")
-        else:
-            self.logger = logger
         if not source.is_persisted():
             raise RuntimeError("SCD2 requires a source table as it updates values")
         if not source.is_cdc:
@@ -278,7 +265,7 @@ class SCD2(TableSynonym):
             table.add_column(pa.field(self.current_flag_column, pa.string()))
 
     def execute(self, duckdb):
-        self.logger.info(f"SCD2() - Started for {self.source.name}")
+        logger.info(f"SCD2() - Started for {self.source.name}")
         self.last_execution = OperationalMetadata()
         source_table = quote_str(self.source.table_name)
         start_date = self.start_date
@@ -315,6 +302,9 @@ class SCD2(TableSynonym):
                     {CHANGE_TYPE_COLUMN} = '{RowType.DELETE.value}' then '{RowType.UPDATE.value}'
                 end
             """
+            logger.debug(f"SCD2() - Converting the CDC info of table {source_table} into SCD2 info: <{sql}>")
+            duckdb.execute(sql, [start_date, end_date, self.termination_date,
+                                 self.current_flag_set, self.current_flag_unset])
         else:
             sql = f"""
             update {source_table} set 
@@ -338,19 +328,17 @@ class SCD2(TableSynonym):
                     {CHANGE_TYPE_COLUMN} = '{RowType.DELETE.value}' then '{RowType.UPDATE.value}'
                 end
             """
-        self.logger.debug(f"SCD2() - Converting the CDC info of table {source_table} into SCD2 info: <{sql}>")
-        duckdb.execute(sql, [start_date, end_date, self.termination_date,
-                             self.current_flag_set, self.current_flag_unset])
+            logger.debug(f"SCD2() - Converting the CDC info of table {source_table} into SCD2 info: <{sql}>")
+            duckdb.execute(sql, [start_date, end_date, self.termination_date])
         res = duckdb.execute(f"select count(*) from {source_table}").fetchall()
         self.last_execution.processed(res[0][0])
-        self.logger.info(f"SCD2() - {self.last_execution}")
+        logger.info(f"SCD2() - {self.last_execution}")
 
 class GenerateKey(TableSynonym):
 
     def __init__(self, cdc_table: Table,
                  start_value: Union[int, Table], name: Union[None, str] = None,
-                 surrogate_key_column: Union[None, str] = None,
-                 logger: Union[None, Logger] = None):
+                 surrogate_key_column: Union[None, str] = None):
         """
         GenerateKey() goes through all rows of the cdc table and updates the surrogate key column with new unique
         numbers. For that it must read the max(surrogate key) from the physical target table and use that as the
@@ -364,16 +352,11 @@ class GenerateKey(TableSynonym):
         :param cdc_table: The table dataset to set the surrogate key values
         :param surrogate_key_column: the column name - default is the physical primary key of the target table
         :param start_value: Either a start value or a table from which the max(surrogate key) is read
-        :param logger: Logger of the dataflow
         """
         if name is None:
             name = f"GenerateKey({cdc_table.table_name})"
         super().__init__(name, cdc_table)
         self.add_input(cdc_table)
-        if logger is None:
-            self.logger = logging.getLogger("Comparison")
-        else:
-            self.logger = logger
         self.surrogate_key_column = surrogate_key_column
         self.start_value = start_value
 
@@ -383,7 +366,7 @@ class GenerateKey(TableSynonym):
             table.set_pk_list([self.surrogate_key_column])
 
     def execute(self, duckdb):
-        self.logger.info(f"GenerateKey() - Started for {self.name}")
+        logger.info(f"GenerateKey() - Started for {self.name}")
         self.last_execution = OperationalMetadata()
         if self.surrogate_key_column is None:
             if isinstance(self.start_value, Table):
@@ -402,7 +385,7 @@ class GenerateKey(TableSynonym):
         start_value = 0
         if isinstance(self.start_value, Table):
             sql = f"select max({quote_str(self.surrogate_key_column)}) from {quote_str(self.start_value.table_name)}"
-            self.logger.debug(
+            logger.debug(
                 f"GenerateKey() - No start value provided, reading the max({self.surrogate_key_column}) value "
                 f"from {self.start_value.table_name}: <{sql}>")
             res = duckdb.execute(sql).fetchall()
@@ -413,24 +396,24 @@ class GenerateKey(TableSynonym):
                 start_value += 1
         sequence_name = self.table_name + "_seq"
         sql = f"create or replace sequence {quote_str(sequence_name)} start {start_value}"
-        self.logger.debug(f"GenerateKey() - Creating the sequence for the key: <{sql}>")
+        logger.debug(f"GenerateKey() - Creating the sequence for the key: <{sql}>")
         duckdb.execute(sql)
         sql = (f"update {quote_str(self.table_name)} set "
                f"{quote_str(self.surrogate_key_column)} = nextval('{sequence_name}') "
                f"where {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}'")
-        self.logger.debug(f"GenerateKey() - Updating the key for all insert rows: <{sql}>")
+        logger.debug(f"GenerateKey() - Updating the key for all insert rows: <{sql}>")
         duckdb.execute(sql)
         res = duckdb.execute(f"select count(*) from {quote_str(self.table_name)} "
                              f"where {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}'").fetchall()
         self.last_execution.processed(res[0][0])
-        self.logger.info(f"GenerateKey() - {self.last_execution}")
+        logger.info(f"GenerateKey() - {self.last_execution}")
 
 
 class CDCOperation(TableSynonym):
 
     def __init__(self, cdc_table: Table, name: Union[None, str] = None, pk_list: Union[None, Iterable[str]] = None,
                  map_insert_to: str = None, map_update_to: str = None, map_before_to: str = None, map_delete_to: str = None,
-                 column_expressions: Union[None, dict[str, str]] = None, logger: Union[None, Logger] = None):
+                 column_expressions: Union[None, dict[str, str]] = None):
         """
         Allows to modify the change type flag and to set values based on the before image.
         For example, Comparison found out the new and changed records but all records should be inserted into
@@ -452,10 +435,6 @@ class CDCOperation(TableSynonym):
             raise RuntimeError("Input dataset must be a CDC table")
         if not cdc_table.is_persisted():
             raise RuntimeError("Input dataset must be a persisted table")
-        if logger is None:
-            self.logger = logging.getLogger("Comparison")
-        else:
-            self.logger = logger
         self.map_insert_to = map_insert_to
         self.map_update_to = map_update_to
         self.map_before_to = map_before_to
@@ -466,7 +445,7 @@ class CDCOperation(TableSynonym):
             self.logical_pk_list = cdc_table.pk_list
 
     def execute(self, duckdb):
-        self.logger.info(f"CDCOperation() - Started for {self.name}")
+        logger.info(f"CDCOperation() - Started for {self.name}")
         self.last_execution = OperationalMetadata()
         mapping_str = ""
         mappings = {
@@ -507,7 +486,7 @@ class CDCOperation(TableSynonym):
                 left join {quote_str(self.table_name)} b on {join_condition}
             """
         duckdb.execute(sql)
-        self.logger.debug(f"CDCOperation() - Updating the table with: <{sql}>")
+        logger.debug(f"CDCOperation() - Updating the table with: <{sql}>")
         res = duckdb.execute(f"select count(*) from {quote_str(self.table_name)}").fetchall()
         self.last_execution.processed(res[0][0])
-        self.logger.info(f"CDCOperation() - {self.last_execution}")
+        logger.info(f"CDCOperation() - {self.last_execution}")

@@ -46,7 +46,6 @@ class Step(ABC):
         self.last_execution: Union[None, OperationalMetadata] = None
         self.schema: Union[None, pa.Schema] = None
 
-
     def add_input(self, step: "Step"):
         if self.inputs is None:
             self.inputs = {step}

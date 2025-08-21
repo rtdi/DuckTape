@@ -1,9 +1,8 @@
-import logging
-from logging import Logger
 from typing import Union, Iterable
 
 from deltalake import DeltaTable, write_deltalake
 
+from Dataflow import logger
 from rtdi_ducktape.CDCTransforms import CHANGE_TYPE_COLUMN, CHANGE_TYPE
 from rtdi_ducktape.Loaders import Loader
 from rtdi_ducktape.Metadata import Dataset, create_join_condition
@@ -15,20 +14,17 @@ class DeltaLakeTable(Loader):
     def __init__(self, root_url: str, source: Dataset, table_name: str, name: Union[None, str] = None,
                  pk_list: Union[None, Iterable[str]] = None, allow_evolution: bool = False,
                  is_cdc: bool = False, generated_key_column: Union[None, str] = None, start_value: Union[None, int] = None,
-                 logger: Union[None, Logger] = None):
+                 storage_options = None):
         super().__init__(source, table_name, name, pk_list, allow_evolution,
-                         is_cdc, generated_key_column, start_value, logger)
+                         is_cdc, generated_key_column, start_value)
         self.root_url = root_url
-        if logger is None:
-            self.logger = logging.getLogger("DeltalakeTable")
-        else:
-            self.logger = logger
         if empty(pk_list):
             self.pk_list = None
         if pk_list is None and source.pk_list is not None:
             self.pk_list = source.pk_list
-            self.logger.debug(f"DeltalakeTable() - No logical primary key provided, using the pk of "
+            logger.debug(f"DeltalakeTable() - No logical primary key provided, using the pk of "
                               f"the input {source}: {source.pk_list}")
+        self.storage_options = storage_options
 
 
     def execute(self, duckdb):
@@ -38,14 +34,14 @@ class DeltaLakeTable(Loader):
         if self.generated_key_column is not None:
             sequence_name = self.table_name + "_seq"
             sql = f"create or replace sequence {quote_str(sequence_name)} start {self.get_generated_key_start(duckdb)}"
-            self.logger.debug(f"GenerateKey() - Creating the sequence for the key: <{sql}>")
+            logger.debug(f"GenerateKey() - Creating the sequence for the key: <{sql}>")
             duckdb.execute(sql)
             gen_column = quote_str(self.generated_key_column)
             if self.source.is_cdc:
                 seq_value_str = f", case when {CHANGE_TYPE_COLUMN} = 'I' then nextval('{sequence_name}') else {gen_column} end as {gen_column}"
             else:
                 seq_value_str = f", coalesce({gen_column}, nextval('{sequence_name}')) as {gen_column}"
-            cols.discard(quote_str(self.generated_key_column))
+            cols.discard(self.generated_key_column)
         cols_str = convert_list_to_str(cols)
         update_map = dict()
         insert_map = dict()
@@ -65,10 +61,10 @@ class DeltaLakeTable(Loader):
             """
         data = duckdb.sql(sql).arrow()
 
-        dt = DeltaTable(f"{self.root_url}/{self.table_name}")
+        dt = DeltaTable(f"{self.root_url}/{self.table_name}", storage_options=self.storage_options)
         if self.pk_list is not None:
             join_condition = create_join_condition(self.pk_list, 's', 't')
-            self.logger.debug(f"DeltaLakeTable() - Join condition for the delta merge is <{join_condition}>")
+            logger.debug(f"DeltaLakeTable() - Join condition for the delta merge is <{join_condition}>")
             if self.source.is_cdc and not self.is_cdc:
                 result = (dt.merge(source=data, predicate=join_condition, source_alias='s', target_alias='t')
                  .when_matched_delete(predicate="s.__change_type = 'D'")
@@ -81,7 +77,7 @@ class DeltaLakeTable(Loader):
                     predicate="s.__change_type = 'I'"
                   )
                  ).execute()
-                self.logger.info(f"DeltaLakeTable written from CDC: {result}")
+                logger.info(f"DeltaLakeTable written from CDC: {result}")
             else:
                 result = (dt.merge(source=data, predicate=join_condition, source_alias='s', target_alias='t')
                  .when_matched_update(
@@ -91,12 +87,12 @@ class DeltaLakeTable(Loader):
                     updates = insert_map
                   )
                  ).execute()
-                self.logger.info(f"DeltaLakeTable written via primary key: {result}")
+                logger.info(f"DeltaLakeTable written via primary key: {result}")
         else:
             write_deltalake(f"{self.root_url}/{self.table_name}", data, mode="append")
-            self.logger.info(f"DeltaLakeTable appended")
-        self.logger.info(f"DeltaLakeTable compacted: {dt.optimize.compact()}")
-        self.logger.info(f"DeltaLakeTable vacuum:"
+            logger.info(f"DeltaLakeTable appended")
+        logger.info(f"DeltaLakeTable compacted: {dt.optimize.compact()}")
+        logger.info(f"DeltaLakeTable vacuum:"
                          f" {dt.vacuum(dry_run=False, retention_hours=0, enforce_retention_duration=False, full=True)}")
 
 
@@ -105,7 +101,7 @@ class DeltaLakeTable(Loader):
             return self.start_value
         elif self.generated_key_column is not None:
             sql = f"select max({quote_str(self.generated_key_column)}) from delta_scan('{self.root_url}/{self.table_name}')"
-            self.logger.debug(
+            logger.debug(
                 f"DeltaLakeTable() - No start value provided, reading the max({self.generated_key_column}) value "
                 f"from {self.root_url}/{self.table_name}: <{sql}>")
             res = duckdb.execute(sql).fetchall()
@@ -118,17 +114,18 @@ class DeltaLakeTable(Loader):
 
     def create_table(self, duckdb):
         table = self.schema.empty_table()
-        write_deltalake(f"{self.root_url}/{self.table_name}", table, mode="overwrite")
+        write_deltalake(f"{self.root_url}/{self.table_name}", table, mode="overwrite",
+                        storage_options=self.storage_options)
 
     def get_cols(self, db) -> set[str]:
-        dt = DeltaTable(f"{self.root_url}/{self.table_name}")
+        dt = DeltaTable(f"{self.root_url}/{self.table_name}", storage_options=self.storage_options)
         table_schema = dt.schema()
         return set(table_schema.to_arrow().names)
 
     def get_table_primary_key(self, db) -> Union[None, set[str]]:
         return None
 
-    def show(self, duckdb, logger: Logger, heading: Union[None, str] = None):
+    def show(self, duckdb, heading: Union[None, str] = None):
         where = ""
         if self.where_clause is not None:
             where = " where " + self.where_clause

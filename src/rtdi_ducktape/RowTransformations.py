@@ -1,8 +1,7 @@
-import logging
-from logging import Logger
 from typing import Union
 
-from rtdi_ducktape.Metadata import Step, Dataset, Query
+from rtdi_ducktape.Dataflow import logger
+from rtdi_ducktape.Metadata import Dataset
 from rtdi_ducktape.SQLUtils import convert_list_to_str, convert_to_order_clause
 
 
@@ -10,7 +9,7 @@ class Lookup(Dataset):
 
     def __init__(self, source: Dataset, lookup_in: Dataset, return_columns: dict[str, str], join_condition: str,
                  order_columns: Union[None, dict[str, bool]],
-                 name: Union[None, str] = None, logger: Union[None, Logger] = None):
+                 name: Union[None, str] = None):
         """
         The idea is to return for each source record exactly one output record - the row count should not change.
         Joining the input dataset could lead to one matched record, multiple match candidates or none.
@@ -27,12 +26,7 @@ class Lookup(Dataset):
         :param join_condition:
         :param order_columns:
         :param name:
-        :param logger:
         """
-        if logger is None:
-            self.logger = logging.getLogger("Lookup")
-        else:
-            self.logger = logger
         if name is None:
             name = f"Lookup for row in dataset {source.name}"
         super().__init__(name)
@@ -68,5 +62,5 @@ class Lookup(Dataset):
                 left join l on ({self.join_condition})
             ) where __version_no = 1
         """
-        self.logger.debug(f"SQL statement for the lookup: <{self.sql}>")
+        logger.debug(f"SQL statement for the lookup: <{self.sql}>")
 

@@ -1,18 +1,12 @@
 import logging
-from logging import Logger
-from typing import Union
-
 from rtdi_ducktape.Metadata import Step, OperationalMetadata, Table
 
+logger = logging.getLogger("Dataflow")
 
 class Dataflow:
 
-    def __init__(self, logger: Union[None, Logger] = None):
+    def __init__(self):
         self.nodes = []
-        if logger is None:
-            self.logger = logging.getLogger("Dataflow")
-        else:
-            self.logger = logger
         self.last_execution = None
 
     def add(self, step: Step):
@@ -29,4 +23,4 @@ class Dataflow:
                     rows_loaded += node.last_execution.rows_processed
             self.last_execution.processed(rows_loaded)
             self.nodes[0].completed()
-            self.logger.info(f"Dataflow() - {self.last_execution}")
+            logger.info(f"Dataflow() - {self.last_execution}")

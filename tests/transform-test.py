@@ -11,7 +11,6 @@ from rtdi_ducktape.Metadata import Table
 from rtdi_ducktape.RowTransformations import Lookup
 
 logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
-logger = logging.getLogger("rtdi_ducktape")
 
 
 class DuckDBTests(unittest.TestCase):
@@ -24,13 +23,13 @@ class DuckDBTests(unittest.TestCase):
         source_table = df.add(Table('csv_data', 'csv_data', pk_list=['Customer Id']))
         tc = df.add(Comparison(source_table, end_date_column="end_date",
                                termination_date=termination_date,
-                               detect_deletes=True, order_column="version_id", logger=logger))
+                               detect_deletes=True, order_column="version_id"))
 
         scd2 = df.add(SCD2(tc, 'start_date', 'end_date',
                     termination_date=termination_date,
-                    current_flag_column='current', current_flag_set='Y', current_flag_unset='N', logger=logger))
+                    current_flag_column='current', current_flag_set='Y', current_flag_unset='N'))
         target_table = df.add(DuckDBTable(scd2, "customer_output", generated_key_column='version_id',
-                                          pk_list=['version_id'], logger=logger))
+                                          pk_list=['version_id']))
         target_table.add_all_columns(source_table, duckdb)
         scd2.add_default_columns(target_table)
         target_table.add_default_columns()
@@ -52,22 +51,22 @@ class DuckDBTests(unittest.TestCase):
         target_table.set_show_where_clause(
             "\"Customer Id\" in ('FaE5E3c1Ea0dAf6', '56b3cEA1E6A49F1', 'eF43a70995dabAB')")
 
-        source_table.show(duckdb, logger, "Source")
+        source_table.show(duckdb, "Source")
         df.start(duckdb)
-        tc.show(duckdb, logger, "CDC table after execution")
-        target_table.show(duckdb, logger, "Target table after apply")
+        tc.show(duckdb, "CDC table after execution")
+        target_table.show(duckdb, "Target table after apply")
 
         duckdb.execute("create or replace table csv_data as (SELECT * FROM 'testdata/customers-100000_change_01.csv')")
-        source_table.show(duckdb, logger, "Source")
+        source_table.show(duckdb, "Source")
         df.start(duckdb)
-        tc.show(duckdb, logger, "CDC table after execution")
-        target_table.show(duckdb, logger, "Target table after apply")
+        tc.show(duckdb, "CDC table after execution")
+        target_table.show(duckdb, "Target table after apply")
 
         duckdb.execute("create or replace table csv_data as (SELECT * FROM 'testdata/customers-100000.csv')")
-        source_table.show(duckdb, logger, "Source")
+        source_table.show(duckdb, "Source")
         df.start(duckdb)
-        tc.show(duckdb, logger, "CDC table after execution")
-        target_table.show(duckdb, logger, "Target table after apply")
+        tc.show(duckdb, "CDC table after execution")
+        target_table.show(duckdb, "Target table after apply")
 
         # ┌─────────────────┬────────────┬────────────────────────────┬────────────────────────────┬─────────┐
         # │   Customer Id   │ First Name │         start_date         │          end_date          │ current │
@@ -109,9 +108,9 @@ class DuckDBTests(unittest.TestCase):
         duckdb.execute("create or replace table csv_data as (SELECT * FROM 'testdata/customers-100000.csv')")
         df = Dataflow()
         source_table = df.add(Table('csv_data', 'csv_data', pk_list=['Customer Id']))
-        tc = df.add(Comparison(source_table, detect_deletes=True, logger=logger))
+        tc = df.add(Comparison(source_table, detect_deletes=True))
 
-        target_table = df.add(DuckDBTable(tc, "customer_output", pk_list=['Customer Id'], logger=logger))
+        target_table = df.add(DuckDBTable(tc, "customer_output", pk_list=['Customer Id']))
         target_table.add_all_columns(source_table, duckdb)
         target_table.create_table(duckdb)
         tc.set_comparison_table(target_table)
@@ -127,18 +126,18 @@ class DuckDBTests(unittest.TestCase):
             "\"Customer Id\" in ('FaE5E3c1Ea0dAf6', '56b3cEA1E6A49F1', 'eF43a70995dabAB')")
 
         df.start(duckdb)
-        tc.show(duckdb, logger, "CDC table after execution")
-        target_table.show(duckdb, logger, "Target table after apply")
+        tc.show(duckdb, "CDC table after execution")
+        target_table.show(duckdb, "Target table after apply")
 
         duckdb.execute("create or replace table csv_data as (SELECT * FROM 'testdata/customers-100000_change_01.csv')")
         df.start(duckdb)
-        tc.show(duckdb, logger, "CDC table after execution")
-        target_table.show(duckdb, logger, "Target table after apply")
+        tc.show(duckdb, "CDC table after execution")
+        target_table.show(duckdb, "Target table after apply")
 
         duckdb.execute("create or replace table csv_data as (SELECT * FROM 'testdata/customers-100000.csv')")
         df.start(duckdb)
-        tc.show(duckdb, logger, "CDC table after execution")
-        target_table.show(duckdb, logger, "Target table after apply")
+        tc.show(duckdb, "CDC table after execution")
+        target_table.show(duckdb, "Target table after apply")
 
         actual = set(target_table.get_show_data(duckdb))
         expected = {('eF43a70995dabAB', 'Terrance'), ('56b3cEA1E6A49F1', 'Barry')}
@@ -154,10 +153,10 @@ class DuckDBTests(unittest.TestCase):
         df = Dataflow()
         source_table = df.add(Table('csv_data', 'csv_data'))
         tc = df.add(Comparison(source_table, detect_deletes=True, logical_pk_list=['Customer Id'],
-                               columns_to_ignore=['change_date'], order_column='change_date', logger=logger))
+                               columns_to_ignore=['change_date'], order_column='change_date'))
         duckdb.execute("create or replace table customer_output as (SELECT * FROM csv_data) with no data")
 
-        target_table = df.add(DuckDBTable(tc, "customer_output", logger=logger))
+        target_table = df.add(DuckDBTable(tc, "customer_output"))
         tc.set_comparison_table(target_table)
 
         tc.set_show_columns(['"Customer Id"', '"First Name"', "__change_type"])
@@ -168,20 +167,20 @@ class DuckDBTests(unittest.TestCase):
                                            "'eF43a70995dabAB')")
 
         df.start(duckdb)
-        tc.show(duckdb, logger, "CDC table after execution")
-        target_table.show(duckdb, logger, "Target table after apply")
+        tc.show(duckdb, "CDC table after execution")
+        target_table.show(duckdb, "Target table after apply")
 
         duckdb.execute("create or replace table csv_data as (SELECT *, '?' as __change_type, "
                        "current_localtimestamp() as change_date FROM 'testdata/customers-100000_change_01.csv')")
         df.start(duckdb)
-        tc.show(duckdb, logger, "CDC table after execution")
-        target_table.show(duckdb, logger, "Target table after apply")
+        tc.show(duckdb, "CDC table after execution")
+        target_table.show(duckdb, "Target table after apply")
 
         duckdb.execute("create or replace table csv_data as (SELECT *, '?' as __change_type, "
                        "current_localtimestamp() as change_date FROM 'testdata/customers-100000.csv')")
         df.start(duckdb)
-        tc.show(duckdb, logger, "CDC table after execution")
-        target_table.show(duckdb, logger, "Target table after apply")
+        tc.show(duckdb, "CDC table after execution")
+        target_table.show(duckdb, "Target table after apply")
 
         target_table.set_show_columns(['"Customer Id"', '"First Name"', "__change_type"])
 
@@ -220,7 +219,7 @@ class DuckDBTests(unittest.TestCase):
         duckdb.execute("alter table csv_data_copy add primary key (\"Customer Id\")")
         df = Dataflow()
         source_table = df.add(Table('csv_data', 'csv_data'))
-        target_table = df.add(DuckDBTable(source_table, "csv_data_copy", logger=logger))
+        target_table = df.add(DuckDBTable(source_table, "csv_data_copy"))
 
         target_table.set_show_columns(
             ['"Customer Id"', '"First Name"'])
@@ -228,10 +227,10 @@ class DuckDBTests(unittest.TestCase):
             "\"Customer Id\" in ('FaE5E3c1Ea0dAf6', '56b3cEA1E6A49F1', 'eF43a70995dabAB')")
 
         df.start(duckdb)
-        target_table.show(duckdb, logger, "Target table after apply")
+        target_table.show(duckdb, "Target table after apply")
 
         df.start(duckdb)
-        target_table.show(duckdb, logger, "Target table after apply")
+        target_table.show(duckdb, "Target table after apply")
 
         actual = set(target_table.get_show_data(duckdb))
         expected = {('eF43a70995dabAB', 'Terrance'), ('56b3cEA1E6A49F1', 'Barry')}
@@ -252,10 +251,9 @@ class DuckDBTests(unittest.TestCase):
                                {"Customer Id": "min_customer_id", "First Name": "min_id_name"},
                                "s.\"Customer Id\" = l.\"Customer Id\"",
                                {"Customer Id": True},
-                               "min customer lookup",
-                               logger
+                               "min customer lookup"
                                ))
-        target_table = df.add(DuckDBTable(lookup, "csv_data_copy", logger=logger))
+        target_table = df.add(DuckDBTable(lookup, "csv_data_copy"))
 
         target_table.set_show_columns(
             ['"Customer Id"', '"First Name"', "min_customer_id", "min_id_name"])
@@ -263,7 +261,7 @@ class DuckDBTests(unittest.TestCase):
             "\"Customer Id\" in ('FaE5E3c1Ea0dAf6', '56b3cEA1E6A49F1', 'eF43a70995dabAB')")
 
         df.start(duckdb)
-        target_table.show(duckdb, logger, "Target table after apply")
+        target_table.show(duckdb, "Target table after apply")
 
         actual = set(target_table.get_show_data(duckdb))
         expected = {
