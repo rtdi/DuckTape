@@ -2,7 +2,7 @@ from typing import Union, Iterable
 
 from deltalake import DeltaTable, write_deltalake
 
-from Dataflow import logger
+from .Dataflow import logger
 from rtdi_ducktape.CDCTransforms import CHANGE_TYPE_COLUMN, CHANGE_TYPE
 from rtdi_ducktape.Loaders import Loader
 from rtdi_ducktape.Metadata import Dataset, create_join_condition
