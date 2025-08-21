@@ -46,11 +46,12 @@ Because the target table has a primary key and the source is not a CDC table but
 
         df = Dataflow()
         source_table = df.add(Table('csv_data', 'csv_data'))
-        target_table = df.add(DuckDBTable(source_table, "csv_data_copy", logger=logger))
+        target_table = df.add(DuckDBTable(source_table, "csv_data_copy"))
         df.start(duckdb)
-        target_table.show(duckdb, logger, "Target table after apply")
+        target_table.show(duckdb, "Target table after apply")
 ```
-When the logging.loglevel=DEBUG, the SQL statements are logged and this would reveal what has been executed
+When the logging.loglevel=DEBUG, the SQL statements are logged and reveals what has been executed
+`logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)`
 
 ```
 with source as (select * from "csv_data") 
@@ -79,7 +80,7 @@ duckdb.execute("create or replace table csv_data_copy as (SELECT * FROM csv_data
 duckdb.execute("alter table csv_data_copy add primary key (\"Customer Id\")")
 df = Dataflow()
 source_table = df.add(Table('csv_data', 'csv_data'))
-target_table = df.add(DuckDBTable(source_table, "csv_data_copy", logger=logger))
+target_table = df.add(DuckDBTable(source_table, "csv_data_copy"))
 df.start(duckdb)
 ```
 
@@ -103,14 +104,14 @@ df = Dataflow()
 source_table = df.add(Table('csv_data', 'csv_data', pk_list=['Customer Id']))
 tc = df.add(Comparison(source_table, end_date_column="end_date",
                        termination_date=termination_date,
-                       detect_deletes=True, order_column="version_id", logger=logger))
+                       detect_deletes=True, order_column="version_id"))
 scd2 = df.add(SCD2(tc, 'start_date', 'end_date',
             termination_date=termination_date,
             current_flag_column='current', current_flag_set='Y',
-            current_flag_unset='N', logger=logger))
+            current_flag_unset='N'))
 target_table = df.add(DuckDBTable(scd2, "customer_output",
                       generated_key_column='version_id',
-                      pk_list=['version_id'], logger=logger))
+                      pk_list=['version_id']))
 
 # create the target table with all needed columns
 target_table.add_all_columns(source_table, duckdb)
@@ -147,11 +148,11 @@ df = Dataflow()
 source_table = df.add(Table('csv_data', 'csv_data'))
 tc = df.add(Comparison(source_table, detect_deletes=True, logical_pk_list=['Customer Id'],
                        columns_to_ignore=['change_date'],
-                       order_column='change_date', logger=logger))
+                       order_column='change_date'))
 duckdb.execute("create or replace table customer_output as "
                "(SELECT * FROM csv_data) with no data")
 
-target_table = df.add(DuckDBTable(tc, "customer_output", logger=logger))
+target_table = df.add(DuckDBTable(tc, "customer_output"))
 tc.set_comparison_table(target_table)
 df.start(duckdb)
 ```
@@ -204,9 +205,8 @@ duckdb.execute("create or replace table csv_data as "
 duckdb.execute("alter table csv_data add primary key (\"Customer Id\")")
 df = Dataflow()
 source_table = df.add(Table('csv_data', 'csv_data', pk_list=["Customer Id"]))
-tc = df.add(Comparison(source_table, detect_deletes=True, logger=logger))
-target_table = df.add(DeltaLakeTable("tmp/deltalake", tc, "csv_data_copy",
-                      logger=logger))
+tc = df.add(Comparison(source_table, detect_deletes=True))
+target_table = df.add(DeltaLakeTable("tmp/deltalake", tc, "csv_data_copy"))
 
 # Create the table in deltalake
 target_table.add_all_columns(source_table, duckdb)
