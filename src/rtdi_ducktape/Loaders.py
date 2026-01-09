@@ -200,9 +200,7 @@ class DuckDBTable(Table):
                 """
             logger.debug(f"DuckDBTable() - Delete all __change_type='D' rows in the target via the SQL <{sql}>")
             duckdb.execute(sql)
-            res = duckdb.execute(f"""
-                with source as ({self.source.get_sub_select_clause()})
-                select count(*) from source""").fetchall()
+            res = duckdb.fetchall()
             self.last_execution.processed(res[0][0])
             logger.info(f"DuckDBTable() - {self.last_execution}")
         else:
@@ -214,9 +212,7 @@ class DuckDBTable(Table):
                     """
                 logger.debug(f"DuckDBTable() - Upsert all rows via the SQL <{sql}>")
                 duckdb.execute(sql)
-                res = duckdb.execute(f"""
-                    with source as ({self.source.get_sub_select_clause()})
-                    select count(*) from source""").fetchall()
+                res = duckdb.fetchall()
                 self.last_execution.processed(res[0][0])
                 logger.info(f"DuckDBTable() - {self.last_execution}")
             elif self.pk_list is not None:
@@ -245,9 +241,7 @@ class DuckDBTable(Table):
                 logger.debug(f"DuckDBTable() - Inserted all new rows via the SQL <{sql}>")
                 duckdb.execute(sql)
 
-                res = duckdb.execute(f"""
-                    with source as ({self.source.get_sub_select_clause()})
-                    select count(*) from source""").fetchall()
+                res = duckdb.fetchall()
                 self.last_execution.processed(res[0][0])
                 logger.info(f"DuckDBTable() - {self.last_execution}")
             else:
@@ -257,9 +251,7 @@ class DuckDBTable(Table):
                     """
                 logger.debug(f"DuckDBTable() - Insert all rows via the SQL <{sql}>")
                 duckdb.execute(sql)
-                res = duckdb.execute(f"""
-                    with source as {self.source.get_sub_select_clause()}
-                    select count(*) from source""").fetchall()
+                res = duckdb.fetchall()
                 self.last_execution.processed(res[0][0])
                 logger.info(f"DuckDBTable() - {self.last_execution}")
 

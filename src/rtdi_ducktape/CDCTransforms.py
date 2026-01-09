@@ -198,7 +198,7 @@ class Comparison(Table):
             duckdb.execute(sql, [self.termination_date])
         else:
             duckdb.execute(sql)
-        res = duckdb.execute(f"select count(*) from {output_table_str}").fetchall()
+        res = duckdb.fetchall()
         self.last_execution.processed(res[0][0])
         logger.info(f"Comparison() - {self.last_execution}")
 
@@ -330,7 +330,7 @@ class SCD2(TableSynonym):
             """
             logger.debug(f"SCD2() - Converting the CDC info of table {source_table} into SCD2 info: <{sql}>")
             duckdb.execute(sql, [start_date, end_date, self.termination_date])
-        res = duckdb.execute(f"select count(*) from {source_table}").fetchall()
+        res = duckdb.fetchall()
         self.last_execution.processed(res[0][0])
         logger.info(f"SCD2() - {self.last_execution}")
 
@@ -403,8 +403,7 @@ class GenerateKey(TableSynonym):
                f"where {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}'")
         logger.debug(f"GenerateKey() - Updating the key for all insert rows: <{sql}>")
         duckdb.execute(sql)
-        res = duckdb.execute(f"select count(*) from {quote_str(self.table_name)} "
-                             f"where {CHANGE_TYPE_COLUMN} = '{RowType.INSERT.value}'").fetchall()
+        res = duckdb.fetchall()
         self.last_execution.processed(res[0][0])
         logger.info(f"GenerateKey() - {self.last_execution}")
 
@@ -487,6 +486,6 @@ class CDCOperation(TableSynonym):
             """
         duckdb.execute(sql)
         logger.debug(f"CDCOperation() - Updating the table with: <{sql}>")
-        res = duckdb.execute(f"select count(*) from {quote_str(self.table_name)}").fetchall()
+        res = duckdb.fetchall()
         self.last_execution.processed(res[0][0])
         logger.info(f"CDCOperation() - {self.last_execution}")
